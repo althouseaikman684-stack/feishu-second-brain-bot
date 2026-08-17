@@ -174,9 +174,24 @@ def send_feishu_reply(chat_id, text_content):
         print(f"[Error] Failed to send Feishu reply: {resp.code}, {resp.msg}")
 
 # ==================== Event Handler ====================
+PROCESSED_MESSAGE_IDS = set()
+
 def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     event = data.event
     message = event.message
+    message_id = message.message_id
+    
+    # 严格去重防重发
+    if message_id in PROCESSED_MESSAGE_IDS:
+        print(f"[Feishu 24/7] 忽略已处理的重复消息: {message_id}")
+        return
+    PROCESSED_MESSAGE_IDS.add(message_id)
+    if len(PROCESSED_MESSAGE_IDS) > 2000:
+        try:
+            PROCESSED_MESSAGE_IDS.pop()
+        except KeyError:
+            pass
+
     chat_id = message.chat_id
     msg_type = message.message_type
     
@@ -184,7 +199,7 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
         try:
             content_dict = json.loads(message.content)
             user_text = content_dict.get("text", "").strip()
-            print(f"📩 [Feishu 24/7] 收到用户消息: {user_text}")
+            print(f"📩 [Feishu 24/7] 收到用户消息 (msg_id: {message_id}): {user_text}")
             
             ai_reply = query_ai_brain(user_text)
             print(f"🤖 [Feishu 24/7] AI 回复生成完毕，正在发送...")
