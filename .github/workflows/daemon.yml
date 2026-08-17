@@ -9,7 +9,7 @@ on:
 
 concurrency:
   group: feishu-bot-247
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   daemon:
