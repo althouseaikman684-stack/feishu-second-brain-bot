@@ -1,0 +1,40 @@
+name: Feishu 24/7 Second Brain Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: feishu-bot-247
+  cancel-in-progress: false
+
+jobs:
+  daemon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install --no-cache-dir -r requirements.txt
+
+      - name: Run Feishu WebSocket Daemon
+        env:
+          FEISHU_APP_ID: "cli_aa09bb45ebf89bda"
+          FEISHU_APP_SECRET: "V02XmqKk5HXUQw43XEx6Gz1hJ0Zd5SNV"
+          DEEPSEEK_API_KEY: "sk-52386a6bd06742c4900b9413923b8010"
+          GITHUB_TOKEN: "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"
+          GITHUB_REPO: "althouseaikman684-stack/second-brain-vault"
+        run: |
+          python -u main.py
