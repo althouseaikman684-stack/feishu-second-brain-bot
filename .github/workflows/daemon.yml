@@ -3,7 +3,7 @@ name: Feishu 24/7 Second Brain Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '0 */5 * * *'
   push:
     branches: [ main ]
 

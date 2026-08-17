@@ -205,13 +205,25 @@ def send_feishu_reply(chat_id, text_content):
 
 # ==================== Event Handler ====================
 PROCESSED_MESSAGE_IDS = set()
+BOT_START_TIME_MS = int(time.time() * 1000)
 
 def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     event = data.event
     message = event.message
     message_id = message.message_id
     
-    # 严格去重防重发
+    # 1. 严格过滤历史重放消息（丢弃机器人启动前发送的消息，或超过 30 秒的历史消息）
+    try:
+        create_time_ms = int(getattr(message, "create_time", 0) or 0)
+        now_ms = int(time.time() * 1000)
+        if create_time_ms > 0:
+            if create_time_ms < (BOT_START_TIME_MS - 5000) or (now_ms - create_time_ms) > 30000:
+                print(f"[Feishu 24/7] 🚫 坚决丢弃历史重放消息: id={message_id}, 延迟={(now_ms - create_time_ms)/1000:.1f}秒")
+                return
+    except Exception as e:
+        print(f"[Warn] 解析消息时间戳失败: {e}")
+
+    # 2. 严格去重防重发
     if message_id in PROCESSED_MESSAGE_IDS:
         print(f"[Feishu 24/7] 忽略已处理的重复消息: {message_id}")
         return
@@ -229,7 +241,7 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
         try:
             content_dict = json.loads(message.content)
             user_text = content_dict.get("text", "").strip()
-            print(f"📩 [Feishu 24/7] 收到用户消息 (msg_id: {message_id}): {user_text}")
+            print(f"📩 [Feishu 24/7] 收到用户即时消息 (msg_id: {message_id}): {user_text}")
             
             ai_reply = query_ai_brain(chat_id, user_text)
             print(f"🤖 [Feishu 24/7] AI 回复生成完毕，正在发送...")
