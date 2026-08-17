@@ -83,8 +83,30 @@ def commit_github_file(path, content, message, sha=None):
         print(f"[Error] commit_github_file: {e}")
         return False
 
+# ==================== Multi-Turn Conversation Memory ====================
+CHAT_SESSIONS = {}
+MAX_SESSION_MESSAGES = 20  # 保留最近 10 轮对话记忆 (20条消息)
+
+def get_session_history(chat_id):
+    return CHAT_SESSIONS.get(chat_id, [])
+
+def append_to_session(chat_id, role, content):
+    if chat_id not in CHAT_SESSIONS:
+        CHAT_SESSIONS[chat_id] = []
+    CHAT_SESSIONS[chat_id].append({"role": role, "content": content})
+    if len(CHAT_SESSIONS[chat_id]) > MAX_SESSION_MESSAGES:
+        CHAT_SESSIONS[chat_id] = CHAT_SESSIONS[chat_id][-MAX_SESSION_MESSAGES:]
+
+def reset_session(chat_id):
+    CHAT_SESSIONS[chat_id] = []
+
 # ==================== DeepSeek AI Reasoning ====================
-def query_ai_brain(user_text):
+def query_ai_brain(chat_id, user_text):
+    # 支持重置记忆指令
+    if user_text in ["清空对话", "重置记忆", "新话题", "reset"]:
+        reset_session(chat_id)
+        return "🧠 对话上下文记忆已重置完毕！我们开启一个崭新的话题吧。"
+
     tasks_data = fetch_github_file("vault/memory/tasks/index.md")
     current_tasks = tasks_data["content"] if tasks_data else "暂无任务清单"
     
@@ -99,11 +121,18 @@ def query_ai_brain(user_text):
 
 【回答规则】：
 1. 语言亲切生动、极具专业深度，针对物理问题给出精确推导与物理图像（支持 Markdown 与 LaTeX 公式）。
-2. 如果用户要求修改待办或标记完成，请在回复末尾附带：
+2. 你具备连续上下文对话记忆能力，请紧密结合前文聊过的内容进行连贯回答。
+3. 如果用户要求修改待办或标记完成，请在回复末尾附带：
    <<<UPDATE_TASK: [替换后的整个tasks/index.md内容]>>>
-3. 如果用户要求记录想法/灵感/随手记，请在回复末尾附带：
+4. 如果用户要求记录想法/灵感/随手记，请在回复末尾附带：
    <<<NEW_NOTE: [文件名.md] | [笔记Markdown内容]>>>
 """
+    # 组装带多轮记忆的完整消息链
+    messages = [{"role": "system", "content": system_prompt}]
+    history = get_session_history(chat_id)
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_text})
+
     try:
         resp = requests.post(
             "https://api.deepseek.com/v1/chat/completions",
@@ -113,17 +142,14 @@ def query_ai_brain(user_text):
             },
             json={
                 "model": "deepseek-chat",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text}
-                ],
+                "messages": messages,
                 "temperature": 0.3
             },
             timeout=30
         )
         ai_reply = resp.json()["choices"][0]["message"]["content"]
         
-        # Intercept task update
+        # 拦截任务更新
         if "<<<UPDATE_TASK:" in ai_reply:
             import re
             match = re.search(r"<<<UPDATE_TASK:\s*([\s\S]*?)>>>", ai_reply)
@@ -136,7 +162,7 @@ def query_ai_brain(user_text):
                 )
             ai_reply = re.sub(r"<<<UPDATE_TASK:[\s\S]*?>>>", "", ai_reply).strip()
 
-        # Intercept note creation
+        # 拦截灵感随手记
         if "<<<NEW_NOTE:" in ai_reply:
             import re
             match = re.search(r"<<<NEW_NOTE:\s*(.*?)\s*\|\s*([\s\S]*?)>>>", ai_reply)
@@ -151,6 +177,10 @@ def query_ai_brain(user_text):
                     f"feat(notes): new note {fn} captured via Feishu cloud bot"
                 )
             ai_reply = re.sub(r"<<<NEW_NOTE:[\s\S]*?>>>", "", ai_reply).strip()
+
+        # 记忆存入当前会话
+        append_to_session(chat_id, "user", user_text)
+        append_to_session(chat_id, "assistant", ai_reply)
 
         return ai_reply
     except Exception as e:
@@ -201,7 +231,7 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
             user_text = content_dict.get("text", "").strip()
             print(f"📩 [Feishu 24/7] 收到用户消息 (msg_id: {message_id}): {user_text}")
             
-            ai_reply = query_ai_brain(user_text)
+            ai_reply = query_ai_brain(chat_id, user_text)
             print(f"🤖 [Feishu 24/7] AI 回复生成完毕，正在发送...")
             send_feishu_reply(chat_id, ai_reply)
         except Exception as e:
