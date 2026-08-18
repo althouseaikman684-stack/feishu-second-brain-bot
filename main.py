@@ -23,8 +23,11 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
     P2ImMessageReceiveV1,
     CreateMessageRequest,
-    CreateMessageRequestBody
+    CreateMessageRequestBody,
+    CreateFileRequest,
+    CreateFileRequestBody
 )
+import io
 
 # ==================== Credentials & Configuration ====================
 CONFIG = {
@@ -369,7 +372,7 @@ def query_ai_brain(chat_id, user_text):
         print(f"[Error] query_ai_brain: {e}")
         return f"大脑思考时遇到了一点网络波动: {e}"
 
-# ==================== Send Feishu Message ====================
+# ==================== Send Feishu Message & File Upload ====================
 def send_feishu_reply(chat_id, text_content):
     client = get_lark_client()
     req = CreateMessageRequest.builder() \
@@ -385,6 +388,128 @@ def send_feishu_reply(chat_id, text_content):
     resp = client.im.v1.message.create(req)
     if not resp.success():
         print(f"[Error] Failed to send Feishu reply: {resp.code}, {resp.msg}")
+
+def upload_and_send_feishu_file(chat_id, file_name, file_content_str):
+    """
+    通过飞书官方开放平台 API 上传文件流，并以原生文件卡片形式发送到聊天窗口
+    用户在手机飞书上可直接点击阅读、保存到本地或转存为飞书云文档
+    """
+    client = get_lark_client()
+    try:
+        file_bytes = file_content_str.encode('utf-8')
+        file_stream = io.BytesIO(file_bytes)
+        
+        # 1. 上传文件到飞书
+        file_req = CreateFileRequest.builder() \
+            .request_body(
+                CreateFileRequestBody.builder()
+                .file_type("stream")
+                .file_name(file_name)
+                .file(file_stream)
+                .build()
+            ).build()
+            
+        file_resp = client.im.v1.file.create(file_req)
+        if not file_resp.success():
+            print(f"[Error] 飞书文件上传失败: code={file_resp.code}, msg={file_resp.msg}")
+            return False
+            
+        file_key = file_resp.data.file_key
+        print(f"✅ [Feishu] 文件上传成功: file_name={file_name}, file_key={file_key}")
+        
+        # 2. 发送文件卡片消息
+        msg_req = CreateMessageRequest.builder() \
+            .receive_id_type("chat_id") \
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("file")
+                .content(json.dumps({"file_key": file_key}))
+                .build()
+            ).build()
+            
+        msg_resp = client.im.v1.message.create(msg_req)
+        if msg_resp.success():
+            print(f"✅ [Feishu] 原生文件卡片消息已成功投递至聊天: {chat_id}")
+            return True
+        else:
+            print(f"[Error] 发送文件卡片消息失败: code={msg_resp.code}, msg={msg_resp.msg}")
+            return False
+    except Exception as e:
+        print(f"[Error] upload_and_send_feishu_file 异常: {e}")
+        return False
+
+def handle_topic_export(chat_id, user_text):
+    """
+    智能拦截大纲与专题导出指令，生成完整 Markdown 文档并上传为飞书原生文件卡片
+    """
+    # 判断是否为导出大纲/文档指令
+    is_export = any(k in user_text for k in ["导出大纲", "导出专题", "整理大纲", "生成大纲", "导出复习", "导出笔记", "大纲文档"])
+    if not is_export and not user_text.strip().startswith("导出"):
+        return False
+
+    # 提取关键字
+    topic = user_text
+    for prefix in ["帮我导出", "导出专题", "导出大纲", "导出复习资料", "整理专题", "整理大纲", "生成大纲", "导出"]:
+        if prefix in topic:
+            topic = topic.replace(prefix, "")
+    topic = topic.replace("大纲", "").replace("专题", "").replace("复习", "").replace("资料", "").replace("文档", "").strip()
+    if not topic:
+        topic = "物理核心知识"
+
+    print(f"⚡ [Feishu] 触发专题大纲文件导出: {topic}")
+    
+    # 检索相关知识文件
+    tree = km.get_all_md_files()
+    matched_paths = [p for p in tree if topic.lower() in p.lower() and "knowledge" in p.lower()]
+    if not matched_paths:
+        matched_paths = [p for p in tree if topic.lower() in p.lower()]
+
+    now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+    doc_lines = [
+        f"# 📚 《{topic}》第二大脑全景知识与复习大纲",
+        f"> 🤖 由林云舒的第二大脑 (JARVIS) 自动聚合生成于 {now_str} (北京时间)",
+        f"> 📐 知识库权威数据来源: `second-brain-vault`",
+        "",
+        "---",
+        ""
+    ]
+    
+    found_any = False
+    for p in matched_paths[:6]:
+        content = km.fetch_file_raw(p)
+        if content:
+            found_any = True
+            doc_lines.append(f"## 📄 核心模块：`{os.path.basename(p)}`\n")
+            doc_lines.append(content)
+            doc_lines.append("\n---\n")
+            
+    if not found_any:
+        retrieved = km.search_relevant_docs(topic)
+        if retrieved:
+            for p, content in retrieved:
+                doc_lines.append(f"## 📄 关联模块：`{os.path.basename(p)}`\n")
+                doc_lines.append(content)
+                doc_lines.append("\n---\n")
+                found_any = True
+
+    if not found_any:
+        send_feishu_reply(chat_id, f"🔍 未能在知识库中找到与「{topic}」相关的专属知识文件。建议尝试：电动力学、量子力学、固体物理、激光原理、热力学与统计物理、等离子体物理。")
+        return True
+
+    file_content_str = "\n".join(doc_lines)
+    file_name = f"{topic}_全景知识大纲.md"
+    
+    # 1. 先发送文本通知
+    send_feishu_reply(chat_id, f"📦 正在为你生成并打包《{topic}》全景复习大纲（共约 {len(file_content_str)} 字），正在上传飞书原生文件卡片...")
+    
+    # 2. 上传并发送真实文件
+    ok = upload_and_send_feishu_file(chat_id, file_name, file_content_str)
+    if ok:
+        send_feishu_reply(chat_id, f"✅ 已成功生成并发送《{file_name}》！\n💡 提示：在手机飞书上点击上方文件卡片即可直接阅读、保存到本地或转存至飞书云文档。")
+    else:
+        send_feishu_reply(chat_id, "⚠️ 飞书文件上传遇到网络波动，已为你生成文本大纲预览：\n\n" + file_content_str[:1000] + "\n\n...(完整内容已存入 vault/)")
+    return True
 
 # ==================== Event Handler ====================
 PROCESSED_MESSAGE_IDS = set()
@@ -426,6 +551,10 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
             user_text = content_dict.get("text", "").strip()
             print(f"📩 [Feishu 24/7] 收到用户即时消息 (msg_id: {message_id}): {user_text}")
             
+            # 优先检查是否为大纲/专题导出指令
+            if handle_topic_export(chat_id, user_text):
+                return
+
             ai_reply = query_ai_brain(chat_id, user_text)
             print(f"🤖 [Feishu 24/7] AI 回复生成完毕，正在发送...")
             send_feishu_reply(chat_id, ai_reply)
