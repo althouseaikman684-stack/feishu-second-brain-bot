@@ -332,7 +332,18 @@ def query_ai_brain(chat_id, user_text):
             },
             timeout=35
         )
-        ai_reply = resp.json()["choices"][0]["message"]["content"]
+        
+        if resp.status_code == 402 or "Insufficient Balance" in resp.text:
+            return "⚠️【DeepSeek API 余额不足】\n你的 DeepSeek 账户余额已用尽（HTTP 402 Insufficient Balance）。\n💡 解决办法：请前往 https://platform.deepseek.com 充值 5~10 元，或生成新 Key 发给电脑端的 Antigravity，即可秒级恢复！"
+            
+        if resp.status_code != 200:
+            return f"⚠️【DeepSeek API 请求失败 (HTTP {resp.status_code})】\n原因：{resp.text[:300]}"
+
+        resp_data = resp.json()
+        if "choices" not in resp_data or not resp_data["choices"]:
+            return f"⚠️【AI 返回格式异常】：{resp.text[:300]}"
+
+        ai_reply = resp_data["choices"][0]["message"]["content"]
         
         # Intercept task updates
         if "<<<UPDATE_TASK:" in ai_reply:
