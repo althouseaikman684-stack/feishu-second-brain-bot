@@ -139,6 +139,9 @@ class CloudKnowledgeManager:
             print(f"[Error] get_vault_tree: {e}")
         return self.tree_cache
 
+    def get_all_md_files(self):
+        return self.get_vault_tree()
+
     def search_relevant_docs(self, query):
         tree = self.get_vault_tree()
         if not tree:
@@ -454,73 +457,81 @@ def handle_topic_export(chat_id, user_text):
     """
     智能拦截大纲与专题导出指令，生成完整 Markdown 文档并上传为飞书原生文件卡片
     """
-    # 判断是否为导出大纲/文档指令
-    is_export = any(k in user_text for k in ["导出大纲", "导出专题", "整理大纲", "生成大纲", "导出复习", "导出笔记", "大纲文档"])
-    if not is_export and not user_text.strip().startswith("导出"):
-        return False
+    try:
+        # 判断是否为导出大纲/文档指令
+        is_export = any(k in user_text for k in ["导出大纲", "导出专题", "整理大纲", "生成大纲", "导出复习", "导出笔记", "大纲文档"])
+        if not is_export and not user_text.strip().startswith("导出"):
+            return False
 
-    # 提取关键字
-    topic = user_text
-    for prefix in ["帮我导出", "导出专题", "导出大纲", "导出复习资料", "整理专题", "整理大纲", "生成大纲", "导出"]:
-        if prefix in topic:
-            topic = topic.replace(prefix, "")
-    topic = topic.replace("大纲", "").replace("专题", "").replace("复习", "").replace("资料", "").replace("文档", "").strip()
-    if not topic:
-        topic = "物理核心知识"
+        # 提取关键字
+        topic = user_text
+        for prefix in ["帮我导出", "导出专题", "导出大纲", "导出复习资料", "整理专题", "整理大纲", "生成大纲", "导出"]:
+            if prefix in topic:
+                topic = topic.replace(prefix, "")
+        topic = topic.replace("大纲", "").replace("专题", "").replace("复习", "").replace("资料", "").replace("文档", "").strip()
+        if not topic:
+            topic = "物理核心知识"
 
-    print(f"⚡ [Feishu] 触发专题大纲文件导出: {topic}")
-    
-    # 检索相关知识文件
-    tree = km.get_all_md_files()
-    matched_paths = [p for p in tree if topic.lower() in p.lower() and "knowledge" in p.lower()]
-    if not matched_paths:
-        matched_paths = [p for p in tree if topic.lower() in p.lower()]
+        print(f"⚡ [Feishu] 触发专题大纲文件导出: {topic}")
+        
+        # 检索相关知识文件
+        tree = km.get_vault_tree()
+        matched_paths = [p for p in tree if topic.lower() in p.lower() and "knowledge" in p.lower()]
+        if not matched_paths:
+            matched_paths = [p for p in tree if topic.lower() in p.lower()]
 
-    now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
-    doc_lines = [
-        f"# 📚 《{topic}》第二大脑全景知识与复习大纲",
-        f"> 🤖 由林云舒的第二大脑 (JARVIS) 自动聚合生成于 {now_str} (北京时间)",
-        f"> 📐 知识库权威数据来源: `second-brain-vault`",
-        "",
-        "---",
-        ""
-    ]
-    
-    found_any = False
-    for p in matched_paths[:6]:
-        content = km.fetch_file_raw(p)
-        if content:
-            found_any = True
-            doc_lines.append(f"## 📄 核心模块：`{os.path.basename(p)}`\n")
-            doc_lines.append(content)
-            doc_lines.append("\n---\n")
-            
-    if not found_any:
-        retrieved = km.search_relevant_docs(topic)
-        if retrieved:
-            for p, content in retrieved:
-                doc_lines.append(f"## 📄 关联模块：`{os.path.basename(p)}`\n")
+        now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+        doc_lines = [
+            f"# 📚 《{topic}》第二大脑全景知识与复习大纲",
+            f"> 🤖 由林云舒的第二大脑 (JARVIS) 自动聚合生成于 {now_str} (北京时间)",
+            f"> 📐 知识库权威数据来源: `second-brain-vault`",
+            "",
+            "---",
+            ""
+        ]
+        
+        found_any = False
+        for p in matched_paths[:6]:
+            content = km.fetch_file_raw(p)
+            if content:
+                found_any = True
+                doc_lines.append(f"## 📄 核心模块：`{os.path.basename(p)}`\n")
                 doc_lines.append(content)
                 doc_lines.append("\n---\n")
-                found_any = True
+                
+        if not found_any:
+            retrieved = km.search_relevant_docs(topic)
+            if retrieved:
+                for p, content in retrieved:
+                    doc_lines.append(f"## 📄 关联模块：`{os.path.basename(p)}`\n")
+                    doc_lines.append(content)
+                    doc_lines.append("\n---\n")
+                    found_any = True
 
-    if not found_any:
-        send_feishu_reply(chat_id, f"🔍 未能在知识库中找到与「{topic}」相关的专属知识文件。建议尝试：电动力学、量子力学、固体物理、激光原理、热力学与统计物理、等离子体物理。")
+        if not found_any:
+            send_feishu_reply(chat_id, f"🔍 未能在知识库中找到与「{topic}」相关的专属知识文件。建议尝试：电动力学、理论力学、微分几何、量子力学、固体物理、激光原理、热力学与统计物理、等离子体物理。")
+            return True
+
+        file_content_str = "\n".join(doc_lines)
+        file_name = f"{topic}_全景知识大纲.md"
+        
+        # 尝试上传飞书原生文件卡片
+        ok = upload_and_send_feishu_file(chat_id, file_name, file_content_str)
+        if ok:
+            send_feishu_reply(chat_id, f"✅ 已成功为你生成并发送《{file_name}》（共约 {len(file_content_str)} 字）！\n💡 提示：在手机飞书上点击上方文件卡片即可直接阅读、保存到本地或转存至飞书云文档。")
+        else:
+            # 优雅降级为精美富文本大纲发送
+            preview_len = min(2000, len(file_content_str))
+            send_feishu_reply(
+                chat_id,
+                f"📚 已为你生成《{topic}》第二大脑全景复习大纲（共约 {len(file_content_str)} 字）：\n\n"
+                f"{file_content_str[:preview_len]}\n\n"
+                f"💡 提示：如需在飞书里直接接收可下载的 .md 原生文件卡片，可前往飞书开发者后台给应用开通「获取与上传图片或文件资源 (im:resource:upload)」权限即可一键直达！"
+            )
         return True
-
-    file_content_str = "\n".join(doc_lines)
-    file_name = f"{topic}_全景知识大纲.md"
-    
-    # 1. 先发送文本通知
-    send_feishu_reply(chat_id, f"📦 正在为你生成并打包《{topic}》全景复习大纲（共约 {len(file_content_str)} 字），正在上传飞书原生文件卡片...")
-    
-    # 2. 上传并发送真实文件
-    ok = upload_and_send_feishu_file(chat_id, file_name, file_content_str)
-    if ok:
-        send_feishu_reply(chat_id, f"✅ 已成功生成并发送《{file_name}》！\n💡 提示：在手机飞书上点击上方文件卡片即可直接阅读、保存到本地或转存至飞书云文档。")
-    else:
-        send_feishu_reply(chat_id, "⚠️ 飞书文件上传遇到网络波动，已为你生成文本大纲预览：\n\n" + file_content_str[:1000] + "\n\n...(完整内容已存入 vault/)")
-    return True
+    except Exception as e:
+        print(f"[Error] handle_topic_export 发生异常: {e}")
+        return False
 
 # ==================== Event Handler ====================
 PROCESSED_MESSAGE_IDS = set()
@@ -571,6 +582,10 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
             send_feishu_reply(chat_id, ai_reply)
         except Exception as e:
             print(f"[Error] 处理消息异常: {e}")
+            try:
+                send_feishu_reply(chat_id, f"⚠️ 处理你的消息时遇到了小异常: {e}，请再试一次或直接提问！")
+            except Exception:
+                pass
 
 # ==================== Main Entry ====================
 def main():
