@@ -1,17 +1,19 @@
+# -*- coding: utf-8 -*-
 """
-Feishu 24/7 WebSocket Second Brain Bot
-======================================
-Cloud Always-On Daemon for Lin Yunshu
+Feishu 24/7 WebSocket Second Brain Bot (Cloud Always-On Daemon)
+==============================================================
+Lin Yunshu's Second Brain Mobile Gateway
 """
 
 import os
 import sys
 import json
 import time
+import re
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
-# Windows console encoding fix
+# Fix Windows console encoding
 if sys.platform == "win32":
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -24,6 +26,7 @@ from lark_oapi.api.im.v1 import (
     CreateMessageRequestBody
 )
 
+# ==================== Credentials & Configuration ====================
 CONFIG = {
     "APP_ID": os.environ.get("FEISHU_APP_ID", "cli_aa09bb45ebf89bda"),
     "APP_SECRET": os.environ.get("FEISHU_APP_SECRET", "V02XmqKk5HXUQw43XEx6Gz1hJ0Zd5SNV"),
@@ -32,6 +35,9 @@ CONFIG = {
     "GITHUB_REPO": os.environ.get("GITHUB_REPO", "althouseaikman684-stack/second-brain-vault")
 }
 
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+# ==================== Lark Client ====================
 lark_client = None
 
 def get_lark_client():
@@ -44,48 +50,190 @@ def get_lark_client():
             .build()
     return lark_client
 
-# ==================== Cloud Knowledge Base Read / Write ====================
-def fetch_github_file(path):
-    try:
-        url = f"https://api.github.com/repos/{CONFIG['GITHUB_REPO']}/contents/{path}"
-        headers = {
-            "Authorization": f"Bearer {CONFIG['GITHUB_TOKEN']}",
-            "User-Agent": "Feishu-Second-Brain-Bot",
-            "Accept": "application/vnd.github.v3+json"
+# ==================== Cloud Knowledge Base Manager ====================
+class CloudKnowledgeManager:
+    def __init__(self, token, repo):
+        self.token = token
+        self.repo = repo
+        self.headers_raw = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3.raw",
+            "User-Agent": "Feishu-Second-Brain-Bot"
         }
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            import base64
-            content = base64.b64decode(resp.json()["content"]).decode("utf-8")
-            return {"content": content, "sha": resp.json()["sha"]}
-    except Exception as e:
-        print(f"[Error] fetch_github_file: {e}")
-    return None
+        self.headers_json = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "Feishu-Second-Brain-Bot"
+        }
+        self.cache = {}
+        self.cache_ttl = 60  # Cache raw files for 60s
+        self.tree_cache = []
+        self.tree_cache_time = 0
 
-def commit_github_file(path, content, message, sha=None):
-    try:
-        url = f"https://api.github.com/repos/{CONFIG['GITHUB_REPO']}/contents/{path}"
-        headers = {
-            "Authorization": f"Bearer {CONFIG['GITHUB_TOKEN']}",
-            "User-Agent": "Feishu-Second-Brain-Bot",
-            "Accept": "application/vnd.github.v3+json"
-        }
+    def fetch_file_raw(self, path):
+        now_ts = time.time()
+        if path in self.cache:
+            data, ts = self.cache[path]
+            if now_ts - ts < self.cache_ttl:
+                return data
+        url = f"https://api.github.com/repos/{self.repo}/contents/{path}"
+        try:
+            r = requests.get(url, headers=self.headers_raw, timeout=10)
+            if r.status_code == 200:
+                self.cache[path] = (r.text, now_ts)
+                return r.text
+        except Exception as e:
+            print(f"[Error] fetch_file_raw({path}): {e}")
+        return ""
+
+    def fetch_file_json(self, path):
+        url = f"https://api.github.com/repos/{self.repo}/contents/{path}"
+        try:
+            r = requests.get(url, headers=self.headers_json, timeout=10)
+            if r.status_code == 200:
+                return r.json()
+        except Exception as e:
+            print(f"[Error] fetch_file_json({path}): {e}")
+        return None
+
+    def commit_file(self, path, content, message, sha=None):
+        url = f"https://api.github.com/repos/{self.repo}/contents/{path}"
         import base64
         body = {
             "message": message,
             "content": base64.b64encode(content.encode("utf-8")).decode("utf-8")
         }
+        if not sha:
+            current_info = self.fetch_file_json(path)
+            if current_info and "sha" in current_info:
+                sha = current_info["sha"]
         if sha:
             body["sha"] = sha
-        resp = requests.put(url, headers=headers, json=body, timeout=10)
-        return resp.status_code in [200, 201]
-    except Exception as e:
-        print(f"[Error] commit_github_file: {e}")
-        return False
+            
+        try:
+            r = requests.put(url, headers=self.headers_json, json=body, timeout=15)
+            # Invalidate cache
+            if path in self.cache:
+                del self.cache[path]
+            return r.status_code in [200, 201]
+        except Exception as e:
+            print(f"[Error] commit_file({path}): {e}")
+            return False
+
+    def get_vault_tree(self):
+        now_ts = time.time()
+        if self.tree_cache and (now_ts - self.tree_cache_time < 600):
+            return self.tree_cache
+        url = f"https://api.github.com/repos/{self.repo}/git/trees/main?recursive=1"
+        try:
+            r = requests.get(url, headers=self.headers_json, timeout=10)
+            if r.status_code == 200:
+                tree = r.json().get("tree", [])
+                self.tree_cache = [x["path"] for x in tree if x["path"].endswith(".md") and x["path"].startswith("vault/")]
+                self.tree_cache_time = now_ts
+                return self.tree_cache
+        except Exception as e:
+            print(f"[Error] get_vault_tree: {e}")
+        return self.tree_cache
+
+    def search_relevant_docs(self, query):
+        tree = self.get_vault_tree()
+        if not tree:
+            return []
+        core_files = {
+            "vault/KB_PROFILE.md",
+            "vault/memory/tasks/index.md",
+            "vault/memory/learning-tracker.md",
+            "vault/memory/decisions/index.md",
+            "vault/memory/notes/index.md",
+            "vault/RULES.md",
+            "vault/memory/AGENTS.md"
+        }
+        
+        # Extract English terms and Chinese n-grams
+        en_terms = [w.lower() for w in re.findall(r'[a-zA-Z0-9_\-]+', query) if len(w) >= 2]
+        cn_clean = "".join(re.findall(r'[\u4e00-\u9fa5]', query))
+        cn_terms = []
+        stop_words = {'今天', '明天', '昨天', '什么', '怎么', '如何', '帮我', '一下', '可以', '这个', '那个', '现在', '有哪些', '是啥', '讲了', '并且', '或者', '知道', '告诉我'}
+        for length in [4, 3, 2]:
+            for i in range(len(cn_clean) - length + 1):
+                term = cn_clean[i:i+length]
+                if term not in stop_words:
+                    cn_terms.append(term)
+        terms = list(set(en_terms + cn_terms))
+        if not terms:
+            return []
+
+        scored = []
+        for path in tree:
+            if path in core_files:
+                continue
+            path_lower = path.lower()
+            score = 0
+            for term in terms:
+                if term in path_lower:
+                    score += len(term) * 2
+            if score > 0:
+                scored.append((score, path))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top_paths = [p for s, p in scored[:2]]
+
+        retrieved = []
+        for p in top_paths:
+            content = self.fetch_file_raw(p)
+            if content:
+                if len(content) > 2000:
+                    content = content[:2000] + "\n...(部分过长内容已截断)..."
+                retrieved.append((p, content))
+        return retrieved
+
+km = CloudKnowledgeManager(CONFIG["GITHUB_TOKEN"], CONFIG["GITHUB_REPO"])
+
+# ==================== Precision Time & Dynamic Countdown Engine ====================
+def get_time_and_schedule_context():
+    now_bj = datetime.now(BEIJING_TZ)
+    today = now_bj.date()
+    today_str = now_bj.strftime("%Y年%m月%d日")
+    time_str = now_bj.strftime("%H:%M")
+    weekday_cn = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][now_bj.weekday()]
+
+    events = [
+        ("山西博物院微信预约与大同高铁购票建议截止", datetime(2026, 8, 20).date()),
+        ("太原·山西5日松弛游 (8/24-8/28)", datetime(2026, 8, 24).date()),
+        ("太原旅游返程飞长沙", datetime(2026, 8, 28).date()),
+        ("等离子体物理25天学习计划正式启动", datetime(2026, 8, 29).date()),
+    ]
+    countdown_lines = []
+    for name, dt in events:
+        diff = (dt - today).days
+        date_label = dt.strftime("%m月%d日")
+        if diff > 0:
+            countdown_lines.append(f"- ⏳ {name}：距今还有 {diff} 天（目标日期：{date_label}）")
+        elif diff == 0:
+            countdown_lines.append(f"- 🚨 {name}：就在今天（{date_label}）！")
+        else:
+            countdown_lines.append(f"- ✅ {name}：已于 {-diff} 天前（{date_label}）过去")
+
+    start_travel = datetime(2026, 8, 24).date()
+    end_travel = datetime(2026, 8, 28).date()
+    if start_travel <= today <= end_travel:
+        day_idx = (today - start_travel).days + 1
+        countdown_lines.append(f"- ✈️ 【实时行程】太原5日游 Day {day_idx}/5 正在进行中！")
+
+    countdowns_text = "\n".join(countdown_lines)
+
+    return f"""【当前真实系统时间（绝对基准）】：
+- 日期：{today_str}（{weekday_cn}）
+- 时间：{time_str} (北京时间)
+- ⚠️ 绝对时间锚定规则：现在就是 {today_str}！所有关于“今天”、“几号”、“距离某事还有几天”的推算，必须以 {today_str} 为唯一基准，严禁沿用历史对话或过往笔记中的旧日期！
+
+【近期关键日程倒计时】：
+{countdowns_text}"""
 
 # ==================== Multi-Turn Conversation Memory ====================
 CHAT_SESSIONS = {}
-MAX_SESSION_MESSAGES = 20  # 保留最近 10 轮对话记忆 (20条消息)
+MAX_SESSION_MESSAGES = 16  # 8 rounds of conversation
 
 def get_session_history(chat_id):
     return CHAT_SESSIONS.get(chat_id, [])
@@ -93,44 +241,78 @@ def get_session_history(chat_id):
 def append_to_session(chat_id, role, content):
     if chat_id not in CHAT_SESSIONS:
         CHAT_SESSIONS[chat_id] = []
-    CHAT_SESSIONS[chat_id].append({"role": role, "content": content})
+    now_bj = datetime.now(BEIJING_TZ)
+    time_tag = now_bj.strftime("%m-%d %H:%M")
+    CHAT_SESSIONS[chat_id].append({
+        "role": role,
+        "content": content,
+        "ts": time.time(),
+        "time_tag": time_tag
+    })
     if len(CHAT_SESSIONS[chat_id]) > MAX_SESSION_MESSAGES:
         CHAT_SESSIONS[chat_id] = CHAT_SESSIONS[chat_id][-MAX_SESSION_MESSAGES:]
 
 def reset_session(chat_id):
     CHAT_SESSIONS[chat_id] = []
 
-# ==================== DeepSeek AI Reasoning ====================
+# ==================== DeepSeek AI Brain Reasoning ====================
 def query_ai_brain(chat_id, user_text):
-    # 支持重置记忆指令
-    if user_text in ["清空对话", "重置记忆", "新话题", "reset"]:
+    # Support reset memory commands
+    if user_text.strip() in ["清空对话", "重置记忆", "新话题", "reset", "/reset"]:
         reset_session(chat_id)
         return "🧠 对话上下文记忆已重置完毕！我们开启一个崭新的话题吧。"
 
-    tasks_data = fetch_github_file("vault/memory/tasks/index.md")
-    current_tasks = tasks_data["content"] if tasks_data else "暂无任务清单"
+    time_ctx = get_time_and_schedule_context()
     
+    # 1. Fetch core knowledge files
+    kb_profile = km.fetch_file_raw("vault/KB_PROFILE.md") or "暂无个人档案"
+    current_tasks = km.fetch_file_raw("vault/memory/tasks/index.md") or "暂无任务清单"
+    learning_tracker = km.fetch_file_raw("vault/memory/learning-tracker.md") or "暂无学习追踪"
+
+    # 2. Dynamic RAG retrieval for specific academic/project/literature queries
+    retrieved_docs = km.search_relevant_docs(user_text)
+    rag_context = ""
+    if retrieved_docs:
+        rag_parts = []
+        for path, doc_text in retrieved_docs:
+            rag_parts.append(f"### 📄 匹配文件：`{path}`\n{doc_text}")
+        rag_context = f"\n【🧠 动态检索到的第二大脑专属知识库文件 (RAG)】：\n" + "\n\n".join(rag_parts) + "\n"
+
     system_prompt = f"""你是林云舒的第二大脑（基于 Google DeepMind Antigravity 架构），正在飞书移动端为云舒提供全天候 24 小时科研与日程助理服务。
 
-【用户档案】：
-- 姓名：林云舒（湖南大学应用物理学本科，已保研至中科大/合肥物质院等离子体所张伟组，研究方向：磁约束核聚变 ICRF 波加热与托卡马克物理）
-- 近期关键日程：2026年8月24日-28日 太原5日游（海友酒店、云冈石窟、晋祠）；8月29日正式启动等离子体物理25天学习计划（双轨体系：Chen导论 + 武松涛托卡马克工程）。
+{time_ctx}
 
-【当前待办清单 (tasks/index.md)】：
+【用户热缓存档案 (KB_PROFILE.md)】：
+{kb_profile}
+
+【当前待办清单 (memory/tasks/index.md)】：
 {current_tasks}
 
+【学习与复习进度 (memory/learning-tracker.md)】：
+{learning_tracker}
+{rag_context}
 【回答规则】：
-1. 语言亲切生动、极具专业深度，针对物理问题给出精确推导与物理图像（支持 Markdown 与 LaTeX 公式）。
-2. 你具备连续上下文对话记忆能力，请紧密结合前文聊过的内容进行连贯回答。
-3. 如果用户要求修改待办或标记完成，请在回复末尾附带：
-   <<<UPDATE_TASK: [替换后的整个tasks/index.md内容]>>>
-4. 如果用户要求记录想法/灵感/随手记，请在回复末尾附带：
-   <<<NEW_NOTE: [文件名.md] | [笔记Markdown内容]>>>
+1. 语言亲切生动、极具专业深度，针对物理/数学/科研问题给出精确推导与物理图像（支持 Markdown 与 LaTeX 公式排版）。
+2. 你具备连续多轮对话记忆能力，请紧密结合前文聊过的内容进行连贯回答。
+3. 严格遵循当前真实时间锚定，牢记今天就是系统指定日期。
+4. 如果用户要求修改待办、打勾完成、新增任务，请在回复末尾附带：
+   <<<UPDATE_TASK: [替换后的整个 memory/tasks/index.md 内容]>>>
+5. 如果用户要求记录想法/灵感/随手记，请在回复末尾附带：
+   <<<NEW_NOTE: [简短英文或拼音或中文文件名.md] | [笔记Markdown完整内容]>>>
 """
-    # 组装带多轮记忆的完整消息链
+
     messages = [{"role": "system", "content": system_prompt}]
+    
+    # Build history with timestamps
     history = get_session_history(chat_id)
-    messages.extend(history)
+    now_ts = time.time()
+    for h in history:
+        # If message was from > 4 hours ago, prepend a temporal note
+        time_prefix = f"[{h.get('time_tag', '')}] " if h.get('time_tag') else ""
+        messages.append({
+            "role": h["role"],
+            "content": f"{time_prefix}{h['content']}"
+        })
     messages.append({"role": "user", "content": user_text})
 
     try:
@@ -145,45 +327,46 @@ def query_ai_brain(chat_id, user_text):
                 "messages": messages,
                 "temperature": 0.3
             },
-            timeout=30
+            timeout=35
         )
         ai_reply = resp.json()["choices"][0]["message"]["content"]
         
-        # 拦截任务更新
+        # Intercept task updates
         if "<<<UPDATE_TASK:" in ai_reply:
-            import re
             match = re.search(r"<<<UPDATE_TASK:\s*([\s\S]*?)>>>", ai_reply)
-            if match and tasks_data:
-                commit_github_file(
+            if match:
+                new_tasks_content = match.group(1).strip()
+                km.commit_file(
                     "vault/memory/tasks/index.md",
-                    match.group(1).strip(),
-                    "update(tasks): updated via 24/7 Feishu cloud bot",
-                    tasks_data["sha"]
+                    new_tasks_content,
+                    "update(tasks): updated via 24/7 Feishu cloud bot"
                 )
             ai_reply = re.sub(r"<<<UPDATE_TASK:[\s\S]*?>>>", "", ai_reply).strip()
 
-        # 拦截灵感随手记
+        # Intercept new notes
         if "<<<NEW_NOTE:" in ai_reply:
-            import re
             match = re.search(r"<<<NEW_NOTE:\s*(.*?)\s*\|\s*([\s\S]*?)>>>", ai_reply)
             if match:
-                now_str = datetime.now().strftime("%Y-%m-%d")
-                fn = f"{now_str}-{match.group(1).strip()}"
-                if not fn.endswith(".md"):
-                    fn += ".md"
-                commit_github_file(
-                    f"vault/memory/notes/{fn}",
-                    match.group(2).strip(),
-                    f"feat(notes): new note {fn} captured via Feishu cloud bot"
+                note_fn = match.group(1).strip()
+                note_body = match.group(2).strip()
+                now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+                clean_fn = f"{now_str}-{note_fn}"
+                if not clean_fn.endswith(".md"):
+                    clean_fn += ".md"
+                km.commit_file(
+                    f"vault/memory/notes/{clean_fn}",
+                    note_body,
+                    f"feat(notes): new note {clean_fn} captured via Feishu cloud bot"
                 )
             ai_reply = re.sub(r"<<<NEW_NOTE:[\s\S]*?>>>", "", ai_reply).strip()
 
-        # 记忆存入当前会话
+        # Store in session memory
         append_to_session(chat_id, "user", user_text)
         append_to_session(chat_id, "assistant", ai_reply)
 
         return ai_reply
     except Exception as e:
+        print(f"[Error] query_ai_brain: {e}")
         return f"大脑思考时遇到了一点网络波动: {e}"
 
 # ==================== Send Feishu Message ====================
@@ -212,18 +395,18 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     message = event.message
     message_id = message.message_id
     
-    # 1. 严格过滤历史重放消息（丢弃机器人启动前发送的消息，或超过 30 秒的历史消息）
+    # 1. Filter out stale / replayed messages (> 30 seconds old or before start)
     try:
         create_time_ms = int(getattr(message, "create_time", 0) or 0)
         now_ms = int(time.time() * 1000)
         if create_time_ms > 0:
             if create_time_ms < (BOT_START_TIME_MS - 5000) or (now_ms - create_time_ms) > 30000:
-                print(f"[Feishu 24/7] 🚫 坚决丢弃历史重放消息: id={message_id}, 延迟={(now_ms - create_time_ms)/1000:.1f}秒")
+                print(f"[Feishu 24/7] 🚫 丢弃历史重放消息: id={message_id}, 延迟={(now_ms - create_time_ms)/1000:.1f}秒")
                 return
     except Exception as e:
-        print(f"[Warn] 解析消息时间戳失败: {e}")
+        print(f"[Warn] Message timestamp parse error: {e}")
 
-    # 2. 严格去重防重发
+    # 2. Strict deduplication
     if message_id in PROCESSED_MESSAGE_IDS:
         print(f"[Feishu 24/7] 忽略已处理的重复消息: {message_id}")
         return
@@ -251,11 +434,13 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
 
 # ==================== Main Entry ====================
 def main():
-    print("=" * 60)
-    print("  ☁️ 林云舒的第二大脑 · 飞书 24/7 云端全天候移动管家 正在启动...")
+    now_bj = datetime.now(BEIJING_TZ)
+    print("=" * 65)
+    print(f"  ☁️ 林云舒的第二大脑 · 飞书 24/7 云端全天候移动管家 正在启动...")
+    print(f"  📌 当前北京时间: {now_bj.strftime('%Y-%m-%d %H:%M:%S %A')}")
     print(f"  📌 App ID: {CONFIG['APP_ID']}")
-    print("  🔌 模式: 飞书官方 WebSocket 长连接 (24/7 永不掉线)")
-    print("=" * 60)
+    print("  🔌 模式: 飞书官方 WebSocket 24/7 长连接 (实时时钟锚定 + 动态 RAG 检索)")
+    print("=" * 65)
 
     event_handler = lark.EventDispatcherHandler.builder("", "") \
         .register_p2_im_message_receive_v1(do_p2_im_message_receive_v1) \
