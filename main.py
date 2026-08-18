@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Feishu 24/7 WebSocket Second Brain Bot (Cloud Always-On Daemon)
-==============================================================
-Lin Yunshu's Second Brain Mobile Gateway
+Feishu 24/7 WebSocket Second Brain Bot (Cloud Always-On Daemon) - V2.0
+======================================================================
+Lin Yunshu's Second Brain Mobile Gateway with Universal KB Sync Engine
 """
 
 import os
@@ -12,10 +12,10 @@ import time
 import re
 import requests
 from datetime import datetime, timezone, timedelta
+import io
 
 # Fix Windows console encoding
 if sys.platform == "win32":
-    import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
@@ -27,7 +27,6 @@ from lark_oapi.api.im.v1 import (
     CreateFileRequest,
     CreateFileRequestBody
 )
-import io
 
 # ==================== Credentials & Configuration ====================
 CONFIG = {
@@ -73,7 +72,16 @@ class CloudKnowledgeManager:
         self.tree_cache = []
         self.tree_cache_time = 0
 
+    def _normalize_path(self, path):
+        path = path.strip().replace("\\", "/")
+        if path.startswith("/"):
+            path = path[1:]
+        if not path.startswith("vault/"):
+            path = f"vault/{path}"
+        return path
+
     def fetch_file_raw(self, path):
+        path = self._normalize_path(path)
         now_ts = time.time()
         if path in self.cache:
             data, ts = self.cache[path]
@@ -90,6 +98,7 @@ class CloudKnowledgeManager:
         return ""
 
     def fetch_file_json(self, path):
+        path = self._normalize_path(path)
         url = f"https://api.github.com/repos/{self.repo}/contents/{path}"
         try:
             r = requests.get(url, headers=self.headers_json, timeout=10)
@@ -100,6 +109,7 @@ class CloudKnowledgeManager:
         return None
 
     def commit_file(self, path, content, message, sha=None):
+        path = self._normalize_path(path)
         url = f"https://api.github.com/repos/{self.repo}/contents/{path}"
         import base64
         body = {
@@ -118,7 +128,12 @@ class CloudKnowledgeManager:
             # Invalidate cache
             if path in self.cache:
                 del self.cache[path]
-            return r.status_code in [200, 201]
+            success = r.status_code in [200, 201]
+            if success:
+                print(f"✅ [GitHub Sync OK] {path} -> {message}")
+            else:
+                print(f"❌ [GitHub Sync Failed] {path} HTTP {r.status_code}: {r.text}")
+            return success
         except Exception as e:
             print(f"[Error] commit_file({path}): {e}")
             return False
@@ -138,9 +153,6 @@ class CloudKnowledgeManager:
         except Exception as e:
             print(f"[Error] get_vault_tree: {e}")
         return self.tree_cache
-
-    def get_all_md_files(self):
-        return self.get_vault_tree()
 
     def search_relevant_docs(self, query):
         tree = self.get_vault_tree()
@@ -183,7 +195,7 @@ class CloudKnowledgeManager:
                 scored.append((score, path))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        top_paths = [p for s, p in scored[:2]]
+        top_paths = [p for s, p in scored[:3]]
 
         retrieved = []
         for p in top_paths:
@@ -261,21 +273,96 @@ def append_to_session(chat_id, role, content):
 def reset_session(chat_id):
     CHAT_SESSIONS[chat_id] = []
 
+# ==================== Deterministic Command Interceptors ====================
+def handle_deterministic_shortcuts(chat_id, user_text):
+    now_bj = datetime.now(BEIJING_TZ)
+    now_date_str = now_bj.strftime("%Y-%m-%d")
+    now_time_str = now_bj.strftime("%H:%M")
+
+    # 1. 快捷添加待办：添加待办 xxx / 新增待办 xxx / 待办: xxx
+    add_task_match = re.match(r'^(?:添加待办|新增待办|加待办|待办[:：])\s*(.+)$', user_text.strip(), re.DOTALL)
+    if add_task_match:
+        task_text = add_task_match.group(1).strip()
+        current_tasks = km.fetch_file_raw("vault/memory/tasks/index.md")
+        if not current_tasks:
+            current_tasks = "# 任务清单\n\n## 🔴 今日/本周必须做\n\n"
+        
+        new_task_item = f"- [ ] {task_text} — 来源: {now_date_str} 飞书指令"
+        if "## 🔴 今日/本周必须做" in current_tasks:
+            parts = current_tasks.split("## 🔴 今日/本周必须做", 1)
+            updated_tasks = parts[0] + "## 🔴 今日/本周必须做\n\n" + new_task_item + "\n" + parts[1].lstrip("\n")
+        else:
+            updated_tasks = current_tasks + f"\n\n## 🔴 今日/本周必须做\n\n{new_task_item}\n"
+        
+        ok = km.commit_file("vault/memory/tasks/index.md", updated_tasks, f"feat(tasks): add task '{task_text[:20]}' via Feishu")
+        if ok:
+            return f"✅ 已成功将待办添加至云端知识库任务清单！\n\n📌 **新增事项**：{task_text}\n📂 **同步文件**：`memory/tasks/index.md`\n⏰ **时间**：{now_date_str} {now_time_str}"
+        else:
+            return f"⚠️ 写入云端待办清单失败，请检查 GitHub 连通性。"
+
+    # 2. 快捷完成待办：完成待办 xxx / 打勾 xxx / 完成: xxx
+    done_task_match = re.match(r'^(?:完成待办|打勾待办|打勾|完成[:：])\s*(.+)$', user_text.strip())
+    if done_task_match:
+        keyword = done_task_match.group(1).strip()
+        current_tasks = km.fetch_file_raw("vault/memory/tasks/index.md")
+        if not current_tasks:
+            return "⚠️ 未能读取到当前任务清单。"
+        
+        lines = current_tasks.split("\n")
+        found = False
+        new_lines = []
+        for line in lines:
+            if line.strip().startswith("- [ ]") and keyword.lower() in line.lower():
+                line = line.replace("- [ ]", "- [x]", 1)
+                if f"（{now_date_str} 完成）" not in line:
+                    line += f" ✅（{now_date_str} 飞书完成）"
+                found = True
+            new_lines.append(line)
+        
+        if not found:
+            return f"🔍 未能在待办清单中匹配到包含「{keyword}」的未完成事项，请检查关键字或输入「查看待办」。"
+        
+        updated_tasks = "\n".join(new_lines)
+        ok = km.commit_file("vault/memory/tasks/index.md", updated_tasks, f"fix(tasks): complete task '{keyword}' via Feishu")
+        if ok:
+            return f"🎉 已将包含「{keyword}」的待办事项标记为已完成 [x]！\n\n📂 **同步文件**：`memory/tasks/index.md`"
+        else:
+            return "⚠️ 更新云端待办失败。"
+
+    # 3. 快捷随手记笔记：记笔记 [标题] | [内容] 或 存笔记 xxx
+    note_match = re.match(r'^(?:记笔记|写笔记|存笔记|随手记)[:：\s]\s*(?:\[(.*?)\]|(.*?))\s*[\|\n]\s*(.+)$', user_text.strip(), re.DOTALL)
+    if note_match:
+        title = (note_match.group(1) or note_match.group(2) or "随手灵感").strip()
+        body = note_match.group(3).strip()
+        clean_title = re.sub(r'[\\/:*?"<>|]', '_', title)
+        filename = f"{now_date_str}-{clean_title}.md"
+        content = f"# {title}\n\n> 🤖 由林云舒于 {now_date_str} {now_time_str} 通过飞书移动端随手记录\n\n---\n\n{body}\n"
+        ok = km.commit_file(f"vault/memory/notes/{filename}", content, f"feat(notes): new note '{clean_title}' via Feishu")
+        if ok:
+            return f"📝 笔记已成功存入云端知识库！\n\n📌 **标题**：{title}\n📂 **保存路径**：`memory/notes/{filename}`\n📊 **字数**：{len(body)} 字"
+        else:
+            return "⚠️ 笔记保存至云端失败。"
+
+    return None
+
 # ==================== DeepSeek AI Brain Reasoning ====================
 def query_ai_brain(chat_id, user_text):
-    # Support reset memory commands
     if user_text.strip() in ["清空对话", "重置记忆", "新话题", "reset", "/reset"]:
         reset_session(chat_id)
         return "🧠 对话上下文记忆已重置完毕！我们开启一个崭新的话题吧。"
 
+    shortcut_res = handle_deterministic_shortcuts(chat_id, user_text)
+    if shortcut_res:
+        append_to_session(chat_id, "user", user_text)
+        append_to_session(chat_id, "assistant", shortcut_res)
+        return shortcut_res
+
     time_ctx = get_time_and_schedule_context()
     
-    # 1. Fetch core knowledge files
     kb_profile = km.fetch_file_raw("vault/KB_PROFILE.md") or "暂无个人档案"
     current_tasks = km.fetch_file_raw("vault/memory/tasks/index.md") or "暂无任务清单"
     learning_tracker = km.fetch_file_raw("vault/memory/learning-tracker.md") or "暂无学习追踪"
 
-    # 2. Dynamic RAG retrieval for specific academic/project/literature queries
     retrieved_docs = km.search_relevant_docs(user_text)
     rag_context = ""
     if retrieved_docs:
@@ -297,23 +384,36 @@ def query_ai_brain(chat_id, user_text):
 【学习与复习进度 (memory/learning-tracker.md)】：
 {learning_tracker}
 {rag_context}
+【⚠️ 核心能力：知识库物理读写系统（至关重要）】：
+你具备对用户 GitHub 云端知识库进行实体读写的权限！系统通过解析你在回复最末尾附带的特殊标签来执行物理写入。
+**【写入铁律】**：如果你在回复中向用户声称“已记录”、“已保存”、“已加入待办”、“已打勾”、“已创建行程/攻略/笔记”或“已更新知识库”，你**必须在回复的最末尾附带对应的操作指令标签**！严禁只用口头承诺而不输出标签！如果没有标签，云端知识库在物理上将**没有任何变动**！
+
+可用的操作指令标签：
+1. **修改/替换整个任务清单 (tasks)**：
+<<<UPDATE_TASK:
+[替换后的整个 memory/tasks/index.md 完整Markdown内容]
+>>>
+
+2. **新建或覆盖任意知识库文件 (通用写入，支持攻略/笔记/档案)**：
+<<<WRITE_FILE: memory/notes/2026-08-18-白水洋旅游攻略.md |
+[完整Markdown文件内容]
+>>>
+
+3. **随手灵感/新建笔记**：
+<<<NEW_NOTE: 白水洋行程规划.md |
+[完整Markdown笔记内容]
+>>>
+
 【回答规则】：
 1. 语言亲切生动、极具专业深度，针对物理/数学/科研问题给出精确推导与物理图像（支持 Markdown 与 LaTeX 公式排版）。
 2. 你具备连续多轮对话记忆能力，请紧密结合前文聊过的内容进行连贯回答。
 3. 严格遵循当前真实时间锚定，牢记今天就是系统指定日期。
-4. 如果用户要求修改待办、打勾完成、新增任务，请在回复末尾附带：
-   <<<UPDATE_TASK: [替换后的整个 memory/tasks/index.md 内容]>>>
-5. 如果用户要求记录想法/灵感/随手记，请在回复末尾附带：
-   <<<NEW_NOTE: [简短英文或拼音或中文文件名.md] | [笔记Markdown完整内容]>>>
 """
 
     messages = [{"role": "system", "content": system_prompt}]
     
-    # Build history with timestamps
     history = get_session_history(chat_id)
-    now_ts = time.time()
     for h in history:
-        # If message was from > 4 hours ago, prepend a temporal note
         time_prefix = f"[{h.get('time_tag', '')}] " if h.get('time_tag') else ""
         messages.append({
             "role": h["role"],
@@ -333,11 +433,11 @@ def query_ai_brain(chat_id, user_text):
                 "messages": messages,
                 "temperature": 0.3
             },
-            timeout=35
+            timeout=40
         )
         
         if resp.status_code == 402 or "Insufficient Balance" in resp.text:
-            return "⚠️【DeepSeek API 余额不足】\n你的 DeepSeek 账户余额已用尽（HTTP 402 Insufficient Balance）。\n💡 解决办法：请前往 https://platform.deepseek.com 充值 5~10 元，或生成新 Key 发给电脑端的 Antigravity，即可秒级恢复！"
+            return "⚠️【DeepSeek API 余额不足】\n你的 DeepSeek 账户余额已用尽（HTTP 402 Insufficient Balance）。\n💡 解决办法：请前往 https://platform.deepseek.com 充值 5~10 元即可恢复！"
             
         if resp.status_code != 200:
             return f"⚠️【DeepSeek API 请求失败 (HTTP {resp.status_code})】\n原因：{resp.text[:300]}"
@@ -348,36 +448,69 @@ def query_ai_brain(chat_id, user_text):
 
         ai_reply = resp_data["choices"][0]["message"]["content"]
         
-        # Intercept task updates
+        executed_actions = []
+
+        # 1. Intercept UPDATE_TASK
         if "<<<UPDATE_TASK:" in ai_reply:
             match = re.search(r"<<<UPDATE_TASK:\s*([\s\S]*?)>>>", ai_reply)
             if match:
                 new_tasks_content = match.group(1).strip()
-                km.commit_file(
+                ok = km.commit_file(
                     "vault/memory/tasks/index.md",
                     new_tasks_content,
                     "update(tasks): updated via 24/7 Feishu cloud bot"
                 )
+                executed_actions.append(("memory/tasks/index.md", ok))
             ai_reply = re.sub(r"<<<UPDATE_TASK:[\s\S]*?>>>", "", ai_reply).strip()
 
-        # Intercept new notes
+        # 2. Intercept WRITE_FILE (Universal)
+        if "<<<WRITE_FILE:" in ai_reply:
+            matches = re.findall(r"<<<WRITE_FILE:\s*(.*?)\s*\|\s*([\s\S]*?)>>>", ai_reply)
+            for file_path, file_content in matches:
+                file_path = file_path.strip()
+                file_content = file_content.strip()
+                ok = km.commit_file(
+                    file_path,
+                    file_content,
+                    f"feat(kb): write file {os.path.basename(file_path)} via Feishu cloud bot"
+                )
+                executed_actions.append((file_path, ok))
+            ai_reply = re.sub(r"<<<WRITE_FILE:[\s\S]*?>>>", "", ai_reply).strip()
+
+        # 3. Intercept NEW_NOTE
         if "<<<NEW_NOTE:" in ai_reply:
-            match = re.search(r"<<<NEW_NOTE:\s*(.*?)\s*\|\s*([\s\S]*?)>>>", ai_reply)
-            if match:
-                note_fn = match.group(1).strip()
-                note_body = match.group(2).strip()
+            matches = re.findall(r"<<<NEW_NOTE:\s*(.*?)\s*\|\s*([\s\S]*?)>>>", ai_reply)
+            for note_fn, note_body in matches:
+                note_fn = note_fn.strip()
+                note_body = note_body.strip()
                 now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
-                clean_fn = f"{now_str}-{note_fn}"
+                clean_fn = f"{now_str}-{note_fn}" if not note_fn.startswith(now_str) else note_fn
                 if not clean_fn.endswith(".md"):
                     clean_fn += ".md"
-                km.commit_file(
-                    f"vault/memory/notes/{clean_fn}",
+                target_path = f"memory/notes/{clean_fn}"
+                ok = km.commit_file(
+                    target_path,
                     note_body,
                     f"feat(notes): new note {clean_fn} captured via Feishu cloud bot"
                 )
+                executed_actions.append((target_path, ok))
             ai_reply = re.sub(r"<<<NEW_NOTE:[\s\S]*?>>>", "", ai_reply).strip()
 
-        # Store in session memory
+        # Append Physical Execution Badges to AI reply
+        if executed_actions:
+            badge_lines = ["\n\n━━━━━━━━━━━━━━━", "🌐 **【云端知识库物理同步状态】**"]
+            for path, ok in executed_actions:
+                clean_disp = path.replace("vault/", "")
+                if ok:
+                    badge_lines.append(f"✅ `[已同步]` 📁 `{clean_disp}` (GitHub Commit OK)")
+                else:
+                    badge_lines.append(f"❌ `[失败]` 📁 `{clean_disp}` (GitHub API 提交异常)")
+            ai_reply += "\n" + "\n".join(badge_lines)
+        else:
+            save_intent = any(k in user_text for k in ["帮我记录", "添加到待办", "加入待办", "保存到知识库", "新建笔记", "保存为笔记", "帮我打勾", "完成待办"])
+            if save_intent and not executed_actions:
+                ai_reply += "\n\n━━━━━━━━━━━━━━━\n💡 *提示：本次回复为对话建议，若需立即物理写入云端知识库，可使用快捷指令，如：「添加待办 [内容]」或「记笔记 [标题] | [内容]」。*"
+
         append_to_session(chat_id, "user", user_text)
         append_to_session(chat_id, "assistant", ai_reply)
 
@@ -404,16 +537,11 @@ def send_feishu_reply(chat_id, text_content):
         print(f"[Error] Failed to send Feishu reply: {resp.code}, {resp.msg}")
 
 def upload_and_send_feishu_file(chat_id, file_name, file_content_str):
-    """
-    通过飞书官方开放平台 API 上传文件流，并以原生文件卡片形式发送到聊天窗口
-    用户在手机飞书上可直接点击阅读、保存到本地或转存为飞书云文档
-    """
     client = get_lark_client()
     try:
         file_bytes = file_content_str.encode('utf-8')
         file_stream = io.BytesIO(file_bytes)
         
-        # 1. 上传文件到飞书
         file_req = CreateFileRequest.builder() \
             .request_body(
                 CreateFileRequestBody.builder()
@@ -431,7 +559,6 @@ def upload_and_send_feishu_file(chat_id, file_name, file_content_str):
         file_key = file_resp.data.file_key
         print(f"✅ [Feishu] 文件上传成功: file_name={file_name}, file_key={file_key}")
         
-        # 2. 发送文件卡片消息
         msg_req = CreateMessageRequest.builder() \
             .receive_id_type("chat_id") \
             .request_body(
@@ -454,16 +581,11 @@ def upload_and_send_feishu_file(chat_id, file_name, file_content_str):
         return False
 
 def handle_topic_export(chat_id, user_text):
-    """
-    智能拦截大纲与专题导出指令，生成完整 Markdown 文档并上传为飞书原生文件卡片
-    """
     try:
-        # 判断是否为导出大纲/文档指令
         is_export = any(k in user_text for k in ["导出大纲", "导出专题", "整理大纲", "生成大纲", "导出复习", "导出笔记", "大纲文档"])
         if not is_export and not user_text.strip().startswith("导出"):
             return False
 
-        # 提取关键字
         topic = user_text
         for prefix in ["帮我导出", "导出专题", "导出大纲", "导出复习资料", "整理专题", "整理大纲", "生成大纲", "导出"]:
             if prefix in topic:
@@ -474,7 +596,6 @@ def handle_topic_export(chat_id, user_text):
 
         print(f"⚡ [Feishu] 触发专题大纲文件导出: {topic}")
         
-        # 检索相关知识文件
         tree = km.get_vault_tree()
         matched_paths = [p for p in tree if topic.lower() in p.lower() and "knowledge" in p.lower()]
         if not matched_paths:
@@ -515,7 +636,6 @@ def handle_topic_export(chat_id, user_text):
         file_content_str = "\n".join(doc_lines)
         file_name = f"{topic}_全景知识大纲.md"
         
-        # 1. 尝试上传飞书原生文件卡片 (直接以内存字节流发送到飞书聊天，绝不污染或重复写入知识库仓库)
         ok = upload_and_send_feishu_file(chat_id, file_name, file_content_str)
         if ok:
             send_feishu_reply(
@@ -524,7 +644,6 @@ def handle_topic_export(chat_id, user_text):
                 f"💡 手机端点击上方文件卡片即可直接阅读、保存到本地或转存至飞书云文档。"
             )
         else:
-            # 2. 如果未开通文件上传权限，直接在飞书聊天窗口以清晰章节结构发送完整大纲
             preview_len = min(2500, len(file_content_str))
             send_feishu_reply(
                 chat_id,
@@ -547,7 +666,6 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     message = event.message
     message_id = message.message_id
     
-    # 1. Filter out stale / replayed messages (> 30 seconds old or before start)
     try:
         create_time_ms = int(getattr(message, "create_time", 0) or 0)
         now_ms = int(time.time() * 1000)
@@ -558,7 +676,6 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
     except Exception as e:
         print(f"[Warn] Message timestamp parse error: {e}")
 
-    # 2. Strict deduplication
     if message_id in PROCESSED_MESSAGE_IDS:
         print(f"[Feishu 24/7] 忽略已处理的重复消息: {message_id}")
         return
@@ -578,7 +695,6 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
             user_text = content_dict.get("text", "").strip()
             print(f"📩 [Feishu 24/7] 收到用户即时消息 (msg_id: {message_id}): {user_text}")
             
-            # 优先检查是否为大纲/专题导出指令
             if handle_topic_export(chat_id, user_text):
                 return
 
@@ -596,10 +712,10 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
 def main():
     now_bj = datetime.now(BEIJING_TZ)
     print("=" * 65)
-    print(f"  ☁️ 林云舒的第二大脑 · 飞书 24/7 云端全天候移动管家 正在启动...")
+    print(f"  ☁️ 林云舒的第二大脑 · 飞书 24/7 云端全天候移动管家 V2.0 正在启动...")
     print(f"  📌 当前北京时间: {now_bj.strftime('%Y-%m-%d %H:%M:%S %A')}")
     print(f"  📌 App ID: {CONFIG['APP_ID']}")
-    print("  🔌 模式: 飞书官方 WebSocket 24/7 长连接 (实时时钟锚定 + 动态 RAG 检索)")
+    print("  🔌 模式: 飞书官方 WebSocket 24/7 长连接 (实体知识库物理同步引擎 + 确定性指令拦截)")
     print("=" * 65)
 
     event_handler = lark.EventDispatcherHandler.builder("", "") \
