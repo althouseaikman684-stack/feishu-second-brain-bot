@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Feishu 24/7 WebSocket Second Brain Bot (Cloud Always-On Daemon) - V2.0
+Feishu 24/7 WebSocket Second Brain Bot (Cloud Always-On Daemon) - V2.1
 ======================================================================
-Lin Yunshu's Second Brain Mobile Gateway with Universal KB Sync Engine
+Lin Yunshu's Second Brain Mobile Gateway with:
+1. Exact Daily Morning Report & Feynman Challenge Sync
+2. Role-Based Access Control (RBAC) & Knowledge Anti-Pollution Guard
 """
 
 import os
@@ -52,7 +54,7 @@ def get_lark_client():
             .build()
     return lark_client
 
-# ==================== Cloud Knowledge Base Manager ====================
+# ==================== Cloud Knowledge Base Manager & RBAC Guard ====================
 class CloudKnowledgeManager:
     def __init__(self, token, repo):
         self.token = token
@@ -79,6 +81,37 @@ class CloudKnowledgeManager:
         if not path.startswith("vault/"):
             path = f"vault/{path}"
         return path
+
+    def check_write_permission(self, path):
+        """
+        移动管家受限写入权限控制网 (RBAC Guard):
+        - ✅ 允许写入: memory/tasks/index.md, memory/notes/*.md, memory/decisions/index.md
+        - 🛡️ 禁止篡改: memory/knowledge/* (核心学术库由 Antigravity 主管理维护), RULES.md, KB_PROFILE.md, files/*
+        """
+        norm_p = self._normalize_path(path)
+        
+        # 1. 允许修改的任务和决策
+        if norm_p in ["vault/memory/tasks/index.md", "vault/memory/decisions/index.md"]:
+            return True, norm_p, "OK"
+        
+        # 2. 允许随手记灵感与攻略笔记
+        if norm_p.startswith("vault/memory/notes/"):
+            return True, norm_p, "OK"
+            
+        # 3. 拦截对核心学科库的随意写入，自动重定向为随手笔记
+        if norm_p.startswith("vault/memory/knowledge/"):
+            fn = os.path.basename(norm_p)
+            diverted_p = f"vault/memory/notes/草稿-{fn}"
+            return True, diverted_p, f"🛡️ 核心学术库 (`memory/knowledge/`) 仅由主管理 Antigravity 维护，已安全转存至笔记: `{diverted_p}`"
+            
+        # 4. 严禁改动系统顶层文件
+        if any(norm_p.startswith(x) for x in ["vault/RULES.md", "vault/KB_PROFILE.md", "vault/memory/AGENTS.md", "vault/files/"]):
+            return False, norm_p, f"🔒 严禁修改系统级核心规则与原始文件档案: `{norm_p}`"
+
+        # 默认归入 notes 目录
+        fn = os.path.basename(norm_p)
+        diverted_p = f"vault/memory/notes/{fn}"
+        return True, diverted_p, "OK"
 
     def fetch_file_raw(self, path):
         path = self._normalize_path(path)
@@ -109,15 +142,19 @@ class CloudKnowledgeManager:
         return None
 
     def commit_file(self, path, content, message, sha=None):
-        path = self._normalize_path(path)
-        url = f"https://api.github.com/repos/{self.repo}/contents/{path}"
+        allowed, final_path, reason = self.check_write_permission(path)
+        if not allowed:
+            print(f"🚫 [RBAC Guard 拦截] {path} -> {reason}")
+            return False, reason
+
+        url = f"https://api.github.com/repos/{self.repo}/contents/{final_path}"
         import base64
         body = {
             "message": message,
             "content": base64.b64encode(content.encode("utf-8")).decode("utf-8")
         }
         if not sha:
-            current_info = self.fetch_file_json(path)
+            current_info = self.fetch_file_json(final_path)
             if current_info and "sha" in current_info:
                 sha = current_info["sha"]
         if sha:
@@ -125,18 +162,18 @@ class CloudKnowledgeManager:
             
         try:
             r = requests.put(url, headers=self.headers_json, json=body, timeout=15)
-            # Invalidate cache
-            if path in self.cache:
-                del self.cache[path]
+            if final_path in self.cache:
+                del self.cache[final_path]
             success = r.status_code in [200, 201]
             if success:
-                print(f"✅ [GitHub Sync OK] {path} -> {message}")
+                print(f"✅ [GitHub Sync OK] {final_path} -> {message}")
+                return True, final_path
             else:
-                print(f"❌ [GitHub Sync Failed] {path} HTTP {r.status_code}: {r.text}")
-            return success
+                print(f"❌ [GitHub Sync Failed] {final_path} HTTP {r.status_code}: {r.text}")
+                return False, f"HTTP {r.status_code}"
         except Exception as e:
-            print(f"[Error] commit_file({path}): {e}")
-            return False
+            print(f"[Error] commit_file({final_path}): {e}")
+            return False, str(e)
 
     def get_vault_tree(self):
         now_ts = time.time()
@@ -169,7 +206,6 @@ class CloudKnowledgeManager:
             "vault/memory/changes/CHANGELOG.md"
         }
         
-        # Extract English terms and Chinese n-grams
         en_terms = [w.lower() for w in re.findall(r'[a-zA-Z0-9_\-]+', query) if len(w) >= 2]
         cn_clean = "".join(re.findall(r'[\u4e00-\u9fa5]', query))
         cn_terms = []
@@ -280,7 +316,7 @@ def handle_deterministic_shortcuts(chat_id, user_text):
     now_date_str = now_bj.strftime("%Y-%m-%d")
     now_time_str = now_bj.strftime("%H:%M")
 
-    # 1. 快捷添加待办：添加待办 xxx / 新增待办 xxx / 待办: xxx
+    # 1. 快捷添加待办
     add_task_match = re.match(r'^(?:添加待办|新增待办|加待办|待办[:：])\s*(.+)$', user_text.strip(), re.DOTALL)
     if add_task_match:
         task_text = add_task_match.group(1).strip()
@@ -295,13 +331,13 @@ def handle_deterministic_shortcuts(chat_id, user_text):
         else:
             updated_tasks = current_tasks + f"\n\n## 🔴 今日/本周必须做\n\n{new_task_item}\n"
         
-        ok = km.commit_file("vault/memory/tasks/index.md", updated_tasks, f"feat(tasks): add task '{task_text[:20]}' via Feishu")
+        ok, res_info = km.commit_file("vault/memory/tasks/index.md", updated_tasks, f"feat(tasks): add task '{task_text[:20]}' via Feishu")
         if ok:
             return f"✅ 已成功将待办添加至云端知识库任务清单！\n\n📌 **新增事项**：{task_text}\n📂 **同步文件**：`memory/tasks/index.md`\n⏰ **时间**：{now_date_str} {now_time_str}"
         else:
-            return f"⚠️ 写入云端待办清单失败，请检查 GitHub 连通性。"
+            return f"⚠️ 写入云端待办清单失败: {res_info}"
 
-    # 2. 快捷完成待办：完成待办 xxx / 打勾 xxx / 完成: xxx
+    # 2. 快捷完成待办
     done_task_match = re.match(r'^(?:完成待办|打勾待办|打勾|完成[:：])\s*(.+)$', user_text.strip())
     if done_task_match:
         keyword = done_task_match.group(1).strip()
@@ -324,13 +360,13 @@ def handle_deterministic_shortcuts(chat_id, user_text):
             return f"🔍 未能在待办清单中匹配到包含「{keyword}」的未完成事项，请检查关键字或输入「查看待办」。"
         
         updated_tasks = "\n".join(new_lines)
-        ok = km.commit_file("vault/memory/tasks/index.md", updated_tasks, f"fix(tasks): complete task '{keyword}' via Feishu")
+        ok, res_info = km.commit_file("vault/memory/tasks/index.md", updated_tasks, f"fix(tasks): complete task '{keyword}' via Feishu")
         if ok:
             return f"🎉 已将包含「{keyword}」的待办事项标记为已完成 [x]！\n\n📂 **同步文件**：`memory/tasks/index.md`"
         else:
-            return "⚠️ 更新云端待办失败。"
+            return f"⚠️ 更新云端待办失败: {res_info}"
 
-    # 3. 快捷随手记笔记：记笔记 [标题] | [内容] 或 存笔记 xxx
+    # 3. 快捷随手记笔记
     note_match = re.match(r'^(?:记笔记|写笔记|存笔记|随手记)[:：\s]\s*(?:\[(.*?)\]|(.*?))\s*[\|\n]\s*(.+)$', user_text.strip(), re.DOTALL)
     if note_match:
         title = (note_match.group(1) or note_match.group(2) or "随手灵感").strip()
@@ -338,11 +374,11 @@ def handle_deterministic_shortcuts(chat_id, user_text):
         clean_title = re.sub(r'[\\/:*?"<>|]', '_', title)
         filename = f"{now_date_str}-{clean_title}.md"
         content = f"# {title}\n\n> 🤖 由林云舒于 {now_date_str} {now_time_str} 通过飞书移动端随手记录\n\n---\n\n{body}\n"
-        ok = km.commit_file(f"vault/memory/notes/{filename}", content, f"feat(notes): new note '{clean_title}' via Feishu")
+        ok, res_info = km.commit_file(f"vault/memory/notes/{filename}", content, f"feat(notes): new note '{clean_title}' via Feishu")
         if ok:
             return f"📝 笔记已成功存入云端知识库！\n\n📌 **标题**：{title}\n📂 **保存路径**：`memory/notes/{filename}`\n📊 **字数**：{len(body)} 字"
         else:
-            return "⚠️ 笔记保存至云端失败。"
+            return f"⚠️ 笔记保存至云端失败: {res_info}"
 
     return None
 
@@ -359,11 +395,21 @@ def query_ai_brain(chat_id, user_text):
         return shortcut_res
 
     time_ctx = get_time_and_schedule_context()
+    now_bj = datetime.now(BEIJING_TZ)
+    now_date_str = now_bj.strftime("%Y-%m-%d")
     
+    # 1. Fetch core knowledge files
     kb_profile = km.fetch_file_raw("vault/KB_PROFILE.md") or "暂无个人档案"
     current_tasks = km.fetch_file_raw("vault/memory/tasks/index.md") or "暂无任务清单"
     learning_tracker = km.fetch_file_raw("vault/memory/learning-tracker.md") or "暂无学习追踪"
+    
+    # 2. 注入【今日真实每日晨报】（确保题目与论文与微信推送 100% 绝对一致）
+    today_morning_report = km.fetch_file_raw(f"vault/memory/summary/daily/{now_date_str}.md")
+    morning_report_section = ""
+    if today_morning_report:
+        morning_report_section = f"\n【🌅 今日真实每日晨报与费曼挑战 (memory/summary/daily/{now_date_str}.md)】：\n{today_morning_report}\n"
 
+    # 3. Dynamic RAG retrieval
     retrieved_docs = km.search_relevant_docs(user_text)
     rag_context = ""
     if retrieved_docs:
@@ -384,36 +430,25 @@ def query_ai_brain(chat_id, user_text):
 
 【学习与复习进度 (memory/learning-tracker.md)】：
 {learning_tracker}
-
+{morning_report_section}
 【知识库核心归档结构常识】：
-- 每日晨报归档：`memory/summary/daily/YYYY-MM-DD.md`（每天早8点由 GitHub Actions 自动生成并提交归档至知识库，包含倒计时、等离子体/AI论文研判与费曼挑战）
+- 每日晨报归档：`memory/summary/daily/YYYY-MM-DD.md`（每天早8点生成并提交，包含今日费曼思考题与前沿论文研判）
 - 旅行与生活攻略：`memory/notes/`（如 `2026-08-24-太原山西5日游攻略.md`）
-- 结构化学科知识：`memory/knowledge/`
+- 结构化学科知识：`memory/knowledge/`（由 Antigravity 主管理维护）
 - 原始文件档案馆：`files/`
 {rag_context}
-【⚠️ 核心能力：知识库物理读写系统（至关重要）】：
-你具备对用户 GitHub 云端知识库进行实体读写的权限！系统通过解析你在回复最末尾附带的特殊标签来执行物理写入。
-**【写入铁律】**：如果你在回复中向用户声称“已记录”、“已保存”、“已加入待办”、“已打勾”、“已创建行程/攻略/笔记”或“已更新知识库”，你**必须在回复的最末尾附带对应的操作指令标签**！严禁只用口头承诺而不输出标签！如果没有标签，云端知识库在物理上将**没有任何变动**！
-
-可用的操作指令标签：
-1. **修改/替换整个任务清单 (tasks)**：
-<<<UPDATE_TASK:
-[替换后的整个 memory/tasks/index.md 完整Markdown内容]
->>>
-
-2. **新建或覆盖任意知识库文件 (通用写入，支持攻略/笔记/档案)**：
-<<<WRITE_FILE: memory/notes/2026-08-18-白水洋旅游攻略.md |
-[完整Markdown文件内容]
->>>
-
-3. **随手灵感/新建笔记**：
-<<<NEW_NOTE: 白水洋行程规划.md |
-[完整Markdown笔记内容]
->>>
+【🛡️ 移动端受限写入权限与防冗余规范】：
+你是知识库的【移动端外勤管家】，权限级别低于电脑端主管理者 Antigravity：
+1. **允许直接更新的任务**：`memory/tasks/index.md`（修改/完成待办）
+2. **允许记录的灵感/攻略**：`memory/notes/`（随手记灵感、临时备忘）
+3. **禁止随意篡改核心学术库**：严禁直接覆盖 `memory/knowledge/` 中的 S/A 级学科笔记，有新内容一律存入 `memory/notes/` 作为待整理草稿，由 Antigravity 后续统一精细整理，防止产生碎片化冗余。
+4. **【写入铁律】**：如果你在回复中向用户表示已添加待办或保存笔记，你**必须在回复末尾附带写入指令标签**：
+   - 更新待办：`<<<UPDATE_TASK: [完整tasks Markdown内容]>>>`
+   - 保存笔记：`<<<NEW_NOTE: [文件名.md] | [完整Markdown内容]>>>`
 
 【回答规则】：
 1. 语言亲切生动、极具专业深度，针对物理/数学/科研问题给出精确推导与物理图像（支持 Markdown 与 LaTeX 公式排版）。
-2. 你具备连续多轮对话记忆能力，请紧密结合前文聊过的内容进行连贯回答。
+2. 如果用户回答或询问今日晨报中的费曼思考题，必须以【今日真实每日晨报】中列出的题目为准进行互动评测！
 3. 严格遵循当前真实时间锚定，牢记今天就是系统指定日期。
 """
 
@@ -462,12 +497,12 @@ def query_ai_brain(chat_id, user_text):
             match = re.search(r"<<<UPDATE_TASK:\s*([\s\S]*?)>>>", ai_reply)
             if match:
                 new_tasks_content = match.group(1).strip()
-                ok = km.commit_file(
+                ok, res_path = km.commit_file(
                     "vault/memory/tasks/index.md",
                     new_tasks_content,
                     "update(tasks): updated via 24/7 Feishu cloud bot"
                 )
-                executed_actions.append(("memory/tasks/index.md", ok))
+                executed_actions.append(("memory/tasks/index.md", ok, res_path))
             ai_reply = re.sub(r"<<<UPDATE_TASK:[\s\S]*?>>>", "", ai_reply).strip()
 
         # 2. Intercept WRITE_FILE (Universal)
@@ -476,12 +511,12 @@ def query_ai_brain(chat_id, user_text):
             for file_path, file_content in matches:
                 file_path = file_path.strip()
                 file_content = file_content.strip()
-                ok = km.commit_file(
+                ok, res_path = km.commit_file(
                     file_path,
                     file_content,
                     f"feat(kb): write file {os.path.basename(file_path)} via Feishu cloud bot"
                 )
-                executed_actions.append((file_path, ok))
+                executed_actions.append((file_path, ok, res_path))
             ai_reply = re.sub(r"<<<WRITE_FILE:[\s\S]*?>>>", "", ai_reply).strip()
 
         # 3. Intercept NEW_NOTE
@@ -495,23 +530,23 @@ def query_ai_brain(chat_id, user_text):
                 if not clean_fn.endswith(".md"):
                     clean_fn += ".md"
                 target_path = f"memory/notes/{clean_fn}"
-                ok = km.commit_file(
+                ok, res_path = km.commit_file(
                     target_path,
                     note_body,
                     f"feat(notes): new note {clean_fn} captured via Feishu cloud bot"
                 )
-                executed_actions.append((target_path, ok))
+                executed_actions.append((target_path, ok, res_path))
             ai_reply = re.sub(r"<<<NEW_NOTE:[\s\S]*?>>>", "", ai_reply).strip()
 
         # Append Physical Execution Badges to AI reply
         if executed_actions:
             badge_lines = ["\n\n━━━━━━━━━━━━━━━", "🌐 **【云端知识库物理同步状态】**"]
-            for path, ok in executed_actions:
-                clean_disp = path.replace("vault/", "")
+            for orig_path, ok, res_path in executed_actions:
+                clean_disp = res_path.replace("vault/", "")
                 if ok:
                     badge_lines.append(f"✅ `[已同步]` 📁 `{clean_disp}` (GitHub Commit OK)")
                 else:
-                    badge_lines.append(f"❌ `[失败]` 📁 `{clean_disp}` (GitHub API 提交异常)")
+                    badge_lines.append(f"❌ `[失败/受限]` 📁 `{orig_path}`: {res_path}")
             ai_reply += "\n" + "\n".join(badge_lines)
         else:
             save_intent = any(k in user_text for k in ["帮我记录", "添加到待办", "加入待办", "保存到知识库", "新建笔记", "保存为笔记", "帮我打勾", "完成待办"])
@@ -604,11 +639,9 @@ def handle_topic_export(chat_id, user_text):
         print(f"⚡ [Feishu] 触发专题大纲文件导出: {topic}")
         
         tree = km.get_vault_tree()
-        # 1. 优先在知识库、笔记和任务中精确匹配主题
         matched_paths = [p for p in tree if topic.lower() in p.lower() and ("knowledge" in p.lower() or "notes" in p.lower())]
         if not matched_paths:
             matched_paths = [p for p in tree if topic.lower() in p.lower()]
-        # 2. 如果是太原/旅行相关，自动聚合攻略与待办
         if any(k in topic for k in ["太原", "大同", "山西", "旅行", "旅游", "行程"]):
             for p in tree:
                 if any(k in p for k in ["太原", "taiyuan", "travel"]):
@@ -644,7 +677,7 @@ def handle_topic_export(chat_id, user_text):
                     found_any = True
 
         if not found_any:
-            send_feishu_reply(chat_id, f"🔍 未能在知识库中找到与「{topic}」相关的专属知识文件。建议尝试：电动力学、理论力学、微分几何、量子力学、固体物理、激光原理、热力学与统计物理、等离子体物理。")
+            send_feishu_reply(chat_id, f"🔍 未能在知识库中找到与「{topic}」相关的专属知识文件。建议尝试：电动力学、理论力学、微分几何、量子力学、固体物理、激光原理、热力学与统计物理、等离子体物理、太原旅游攻略。")
             return True
 
         file_content_str = "\n".join(doc_lines)
@@ -726,10 +759,10 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
 def main():
     now_bj = datetime.now(BEIJING_TZ)
     print("=" * 65)
-    print(f"  ☁️ 林云舒的第二大脑 · 飞书 24/7 云端全天候移动管家 V2.0 正在启动...")
+    print(f"  ☁️ 林云舒的第二大脑 · 飞书 24/7 云端全天候移动管家 V2.1 正在启动...")
     print(f"  📌 当前北京时间: {now_bj.strftime('%Y-%m-%d %H:%M:%S %A')}")
     print(f"  📌 App ID: {CONFIG['APP_ID']}")
-    print("  🔌 模式: 飞书官方 WebSocket 24/7 长连接 (实体知识库物理同步引擎 + 确定性指令拦截)")
+    print("  🔌 模式: 飞书官方 WebSocket 24/7 长连接 (RBAC分级权限防护网 + 每日晨报题目绝对对齐)")
     print("=" * 65)
 
     event_handler = lark.EventDispatcherHandler.builder("", "") \
