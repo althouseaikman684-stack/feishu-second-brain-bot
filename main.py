@@ -165,7 +165,8 @@ class CloudKnowledgeManager:
             "vault/memory/decisions/index.md",
             "vault/memory/notes/index.md",
             "vault/RULES.md",
-            "vault/memory/AGENTS.md"
+            "vault/memory/AGENTS.md",
+            "vault/memory/changes/CHANGELOG.md"
         }
         
         # Extract English terms and Chinese n-grams
@@ -383,6 +384,12 @@ def query_ai_brain(chat_id, user_text):
 
 【学习与复习进度 (memory/learning-tracker.md)】：
 {learning_tracker}
+
+【知识库核心归档结构常识】：
+- 每日晨报归档：`memory/summary/daily/YYYY-MM-DD.md`（每天早8点由 GitHub Actions 自动生成并提交归档至知识库，包含倒计时、等离子体/AI论文研判与费曼挑战）
+- 旅行与生活攻略：`memory/notes/`（如 `2026-08-24-太原山西5日游攻略.md`）
+- 结构化学科知识：`memory/knowledge/`
+- 原始文件档案馆：`files/`
 {rag_context}
 【⚠️ 核心能力：知识库物理读写系统（至关重要）】：
 你具备对用户 GitHub 云端知识库进行实体读写的权限！系统通过解析你在回复最末尾附带的特殊标签来执行物理写入。
