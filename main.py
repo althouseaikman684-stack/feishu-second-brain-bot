@@ -147,7 +147,7 @@ class CloudKnowledgeManager:
             r = requests.get(url, headers=self.headers_json, timeout=10)
             if r.status_code == 200:
                 tree = r.json().get("tree", [])
-                self.tree_cache = [x["path"] for x in tree if x["path"].endswith(".md") and x["path"].startswith("vault/")]
+                self.tree_cache = [x["path"] for x in tree if (x["path"].endswith(".md") or x["path"].endswith(".html")) and x["path"].startswith("vault/")]
                 self.tree_cache_time = now_ts
                 return self.tree_cache
         except Exception as e:
@@ -597,9 +597,16 @@ def handle_topic_export(chat_id, user_text):
         print(f"⚡ [Feishu] 触发专题大纲文件导出: {topic}")
         
         tree = km.get_vault_tree()
-        matched_paths = [p for p in tree if topic.lower() in p.lower() and "knowledge" in p.lower()]
+        # 1. 优先在知识库、笔记和任务中精确匹配主题
+        matched_paths = [p for p in tree if topic.lower() in p.lower() and ("knowledge" in p.lower() or "notes" in p.lower())]
         if not matched_paths:
             matched_paths = [p for p in tree if topic.lower() in p.lower()]
+        # 2. 如果是太原/旅行相关，自动聚合攻略与待办
+        if any(k in topic for k in ["太原", "大同", "山西", "旅行", "旅游", "行程"]):
+            for p in tree:
+                if any(k in p for k in ["太原", "taiyuan", "travel"]):
+                    if p not in matched_paths:
+                        matched_paths.append(p)
 
         now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
         doc_lines = [
