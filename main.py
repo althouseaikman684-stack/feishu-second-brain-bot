@@ -513,41 +513,25 @@ def handle_topic_export(chat_id, user_text):
             return True
 
         file_content_str = "\n".join(doc_lines)
-        now_date_str = datetime.now(BEIJING_TZ).strftime("%Y%m%d")
-        export_file_path = f"vault/memory/exports/{now_date_str}_{topic}_全景大纲.md"
-        
-        # 1. 自动同步持久化到云端 GitHub 仓库
-        km.commit_file(
-            export_file_path,
-            file_content_str,
-            f"feat(export): auto-generate {topic} outline from Feishu mobile"
-        )
-        
-        import urllib.parse
-        encoded_path = urllib.parse.quote(export_file_path)
-        cloud_url = f"https://github.com/{CONFIG['GITHUB_REPO']}/blob/main/{encoded_path}"
-        raw_url = f"https://raw.githubusercontent.com/{CONFIG['GITHUB_REPO']}/main/{encoded_path}"
-        
-        # 2. 尝试上传飞书原生文件卡片
         file_name = f"{topic}_全景知识大纲.md"
+        
+        # 1. 尝试上传飞书原生文件卡片 (直接以内存字节流发送到飞书聊天，绝不污染或重复写入知识库仓库)
         ok = upload_and_send_feishu_file(chat_id, file_name, file_content_str)
         if ok:
             send_feishu_reply(
                 chat_id,
                 f"✅ 已成功为你生成并发送《{file_name}》（共 {len(file_content_str)} 字）！\n\n"
-                f"💡 手机端可直接点击上方文件卡片查看，或通过云端链接一键直达：\n🔗 {cloud_url}"
+                f"💡 手机端点击上方文件卡片即可直接阅读、保存到本地或转存至飞书云文档。"
             )
         else:
-            # 优雅降级：提供 1 键直达云端下载链接 + 核心预览
-            preview_len = min(1500, len(file_content_str))
+            # 2. 如果未开通文件上传权限，直接在飞书聊天窗口以清晰章节结构发送完整大纲
+            preview_len = min(2500, len(file_content_str))
             send_feishu_reply(
                 chat_id,
-                f"📚 已成功为你聚合生成《{topic}》第二大脑全景复习大纲（共 {len(file_content_str)} 字）！\n\n"
-                f"📥【点击手机直达完整 .md 文件】\n🔗 {cloud_url}\n\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"📖【大纲核心内容速览】：\n\n"
+                f"📚 《{topic}》第二大脑全景复习大纲（共 {len(file_content_str)} 字）：\n\n"
                 f"{file_content_str[:preview_len]}\n\n"
-                f"...\n*(完整上万字内容已持久化归档至云端知识库)*"
+                f"━━━━━━━━━━━━━━━\n"
+                f"💡 提示：如需在飞书里直接接收可下载的 .md 原生文件卡片（不占知识库空间），只需在飞书开发者后台勾选「获取与上传图片或文件资源 (im:resource:upload)」权限即可！"
             )
         return True
     except Exception as e:
