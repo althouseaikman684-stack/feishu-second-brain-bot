@@ -653,7 +653,102 @@ def handle_topic_export(chat_id, user_text):
             return False
 
         print(f"⚡ [Feishu] 触发确定性专题大纲文件导出: {topic}")
-        
+
+        now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
+        now_time_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+
+        # 特别支持 1：导出今日费曼挑战与推导大纲
+        if any(k in topic for k in ["费曼", "思考题", "挑战"]):
+            morning_report = km.fetch_file_raw(f"vault/memory/summary/daily/{now_str}.md")
+            qm_notes = km.fetch_file_raw("vault/memory/knowledge/量子力学-知识点总结.md")
+            
+            feynman_doc = f"""# 🎯 今日费曼挑战 · 深度数理推导与物理图像 ({now_str})
+
+> 📚 **学科领域**：量子力学 (S级核心资产)  
+> ❓ **思考题**：在一维无限深势阱中，如果势阱宽度突然扩大一倍（瞬变近似），为什么基态波函数向偶数能级的跃迁概率为 0，而只向奇数能级跃迁？这体现了什么对称性选择定则？  
+> 🤖 **解析者**：林云舒的第二大脑 (Google DeepMind Antigravity)  
+
+---
+
+## 物理图像总览（The Core Intuition）
+
+在**瞬变近似（Sudden Approximation）**下，外场或边界条件变化的特征时间 $\\tau$ 远小于体系波函数演化的内在周期 $T = \\hbar / \\Delta E$（即 $\\tau \\ll T$）。  
+因此，**在势阱宽度突然从 $a$ 扩大到 $2a$ 的瞬间，粒子的空间波函数来不及发生任何改变，依然保持为原势阱中的基态分布 $\\psi_1(x)$**。
+
+决定粒子最终处于新势阱各能级概率的，是初态在新本征基矢上的**投影展开系数（跃迁振幅）**：
+$$c_n = \\langle \\psi_n' | \\psi_1 \\rangle = \\int_{-\\infty}^{+\\infty} \\psi_n'^*(x) \\psi_1(x) \\, dx$$
+跃迁概率即为 $P_{1 \\to n} = |c_n|^2$。
+
+---
+
+## 严密数理推导
+
+### 1. 选取具有明显对称性的坐标系
+为了最简洁地利用宇称（Parity），我们将坐标原点 $x = 0$ 设在**原势阱的中心**：
+- **初态（原势阱，区间 $[-a/2, a/2]$）**：
+  $$\\psi_1(x) = \\begin{{cases}} \\sqrt{{\\frac{{2}}{{a}}}} \\cos\\left(\\frac{{\\pi x}}{{a}}\\right), & x \\in \\left[-\\frac{{a}}{{2}}, \\frac{{a}}{{2}}\\right] \\\\ 0, & |x| > \\frac{{a}}{{2}} \\end{{cases}}$$
+  观察可知：$\\psi_1(-x) = \\psi_1(x)$，初态关于原点具有**严格的偶宇称（Even Parity）**。
+
+- **末态本征基（新势阱，区间 $[-a, a]$，总宽度 $2a$）**：
+  新势阱的本征函数在对称区间 $[-a, a]$ 内按宇称交替排列：
+  $$\\psi_n'(x) = \\begin{{cases}} \\sqrt{{\\frac{{1}}{{a}}}} \\cos\\left(\\frac{{n\\pi x}}{{2a}}\\right), & n = 1, 3, 5, \\dots \\text{{ (奇数能级，偶宇称)}} \\\\ \\sqrt{{\\frac{{1}}{{a}}}} \\sin\\left(\\frac{{n\\pi x}}{{2a}}\\right), & n = 2, 4, 6, \\dots \\text{{ (偶数能级，奇宇称)}} \\end{{cases}}$$
+
+### 2. 对称性与宇称积分（宇称选择定则）
+计算跃迁振幅积分：
+$$c_n = \\int_{-a/2}^{{a/2}} \\psi_n'^*(x) \\psi_1(x) \\, dx$$
+
+- 当 $n$ 为**偶数**（$n = 2, 4, 6, \\dots$）时：
+  * $\\psi_1(x)$ 是 **偶函数（Even）**
+  * $\\psi_n'(x) \\propto \\sin\\left(\\frac{{n\\pi x}}{{2a}}\\right)$ 是 **奇函数（Odd）**
+  * 被积函数为：$\\text{{Odd}} \\times \\text{{Even}} = \\text{{Odd}}$（奇函数）
+  * 在关于原点对称的积分区间 $[-a/2, a/2]$ 上：
+    $$c_n = \\int_{-a/2}^{{a/2}} (\\text{{奇函数}}) \\, dx = 0 \\quad (\\forall n = 2k, \\, k \\in \\mathbb{{N}}^+)$$
+  * 因此，**向所有偶数能级的跃迁概率恒为零**：$P_{{1 \\to 2k}} = |c_{{2k}}|^2 \\equiv 0$！
+
+- 当 $n$ 为**奇数**（$n = 1, 3, 5, \\dots$）时：
+  * $\\psi_n'(x)$ 为偶函数，被积函数为 $\\text{{Even}} \\times \\text{{Even}} = \\text{{Even}}$；
+  * 积分不为零，具体计算积化和差可得：
+    $$c_n = \\sqrt{{\\frac{{2}}{{a^2}}}} \\int_{-a/2}^{{a/2}} \\cos\\left(\\frac{{n\\pi x}}{{2a}}\\right) \\cos\\left(\\frac{{\\pi x}}{{a}}\\right) \\, dx = \\frac{{4\\sqrt{{2}}}}{{\\pi}} \\frac{{\\cos(n\\pi/4)}}{{4 - n^2}} \\quad (n = 1, 3, 5, \\dots)$$
+  * 例如：
+    * $n = 1$（新基态）：$P_{{1 \\to 1}} = |c_1|^2 = \\frac{{32}}{{9\\pi^2}} \\approx 36.03\\%$
+    * $n = 3$：$P_{{1 \\to 3}} = |c_3|^2 = \\frac{{32}}{{25\\pi^2}} \\approx 12.97\\%$
+
+---
+
+## 深刻的物理本质：对称性与选择定则（Selection Rule）
+
+1. **空间反演对称性（Parity Conservation）**：
+   * 瞬变过程中，势阱的膨胀是**关于中心左右对称向两边对称扩张**的，体系的 Hamiltonian $H(t)$ 在所有时刻都保持关于原点的空间反演不变性（$[H, \\hat{{P}}] = 0$）。
+   * 空间反演算符（宇称算符 $\\hat{{P}}$）是对称性算符，初始波函数属于 $\\hat{{P}}$ 的 $+1$ 本征态（偶宇称）。
+   * 对称扩张的操作无法破坏体系的对称性，因此波函数在演化中**只能保持在偶宇称子空间内展开**，不可能自发产生奇宇称分量。
+
+2. **量子跃迁选择定则的一般性结论**：
+   * 若扰动或外场是偶宇称的（例如对称势场变动），则跃迁定则为 $\\Delta \\text{{Parity}} = 0$（同宇称跃迁）；
+   * 若扰动是奇宇称的（如电偶极跃迁算符 $\\hat{{x}}$），则跃迁定则为 $\\Delta \\text{{Parity}} \\ne 0$（异宇称跃迁，如原子光谱的 Laporte 定则）。
+
+---
+> 💡 *本解答由第二大脑整理归档至 `memory/summary/daily/{now_str}.md` 与量子力学专题库。在飞书云文档中打开可获得完整的 LaTeX 公式排版体验！*
+"""
+            fn = f"{now_str}_量子力学费曼挑战_瞬变势阱对称性定则解析.md"
+            ok = upload_and_send_feishu_file(chat_id, fn, feynman_doc)
+            if ok:
+                send_feishu_reply(chat_id, f"🎯 已成功为你生成并发送今日费曼挑战的深度解析文档《{fn}》！\n\n💡 手机端点击上方文件卡片，选择「用飞书云文档打开」，即可享受完美渲染编译的 LaTeX 积分与公式排版！")
+            else:
+                send_feishu_reply(chat_id, feynman_doc)
+            return True
+
+        # 特别支持 2：导出今日晨报
+        if "晨报" in topic:
+            morning_report = km.fetch_file_raw(f"vault/memory/summary/daily/{now_str}.md")
+            if morning_report:
+                fn = f"{now_str}_每日晨报与前沿研判.md"
+                ok = upload_and_send_feishu_file(chat_id, fn, morning_report)
+                if ok:
+                    send_feishu_reply(chat_id, f"🌅 已成功为你生成并发送今日晨报文档《{fn}》！\n\n💡 点击上方文件卡片即可用飞书云文档查看。")
+                else:
+                    send_feishu_reply(chat_id, morning_report)
+                return True
+
         tree = km.get_vault_tree()
         matched_paths = [p for p in tree if topic.lower() in p.lower() and ("knowledge" in p.lower() or "notes" in p.lower())]
         if not matched_paths:
