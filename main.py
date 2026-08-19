@@ -624,19 +624,35 @@ def upload_and_send_feishu_file(chat_id, file_name, file_content_str):
 
 def handle_topic_export(chat_id, user_text):
     try:
-        is_export = any(k in user_text for k in ["导出大纲", "导出专题", "整理大纲", "生成大纲", "导出复习", "导出笔记", "大纲文档"])
-        if not is_export and not user_text.strip().startswith("导出"):
+        text = user_text.strip()
+        # 1. 过滤疑问句和日常提问（如“你能导出大纲吗”、“怎么导出大纲”），交由大模型正常解答
+        question_words = ["吗", "？", "?", "能不能", "是否", "怎么", "如何", "为什么", "可以吗", "能吗", "会吗", "有吗"]
+        if any(q in text for q in question_words):
             return False
 
-        topic = user_text
-        for prefix in ["帮我导出", "导出专题", "导出大纲", "导出复习资料", "整理专题", "整理大纲", "生成大纲", "导出"]:
-            if prefix in topic:
-                topic = topic.replace(prefix, "")
-        topic = topic.replace("大纲", "").replace("专题", "").replace("复习", "").replace("资料", "").replace("文档", "").strip()
-        if not topic:
-            topic = "物理核心知识"
+        # 2. 精确匹配命令式导出指令，如：
+        # - 导出大纲 电动力学
+        # - 导出专题 [热力学]
+        # - 帮我导出 太原旅游攻略
+        # - 导出复习资料 微分几何
+        pattern = r'^(?:帮我|请)?(?:导出|整理|生成)(?:专题|大纲|复习大纲|复习资料|知识大纲|笔记大纲)[:：\s]*(?:\[(.*?)\]|(.*?))$'
+        match = re.match(pattern, text)
+        if not match:
+            if text.startswith("导出 ") or text.startswith("导出：") or text.startswith("导出:"):
+                topic = text[3:].strip()
+            else:
+                return False
+        else:
+            topic = (match.group(1) or match.group(2) or "").strip()
 
-        print(f"⚡ [Feishu] 触发专题大纲文件导出: {topic}")
+        # 去除残余助词和标点
+        topic = re.sub(r'^(?:专题|大纲|复习|资料|文档)\s*', '', topic)
+        topic = re.sub(r'\s*(?:专题|大纲|复习|资料|文档)$', '', topic).strip()
+
+        if not topic or len(topic) < 2:
+            return False
+
+        print(f"⚡ [Feishu] 触发确定性专题大纲文件导出: {topic}")
         
         tree = km.get_vault_tree()
         matched_paths = [p for p in tree if topic.lower() in p.lower() and ("knowledge" in p.lower() or "notes" in p.lower())]
