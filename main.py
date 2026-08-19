@@ -625,34 +625,27 @@ def upload_and_send_feishu_file(chat_id, file_name, file_content_str):
 def handle_topic_export(chat_id, user_text):
     try:
         text = user_text.strip()
-        # 1. 过滤疑问句和日常提问（如“你能导出大纲吗”、“怎么导出大纲”），交由大模型正常解答
-        question_words = ["吗", "？", "?", "能不能", "是否", "怎么", "如何", "为什么", "可以吗", "能吗", "会吗", "有吗"]
+        # 1. 过滤疑问句和日常探讨（交由大模型正常解答）
+        question_words = ["吗", "？", "?", "能不能", "是否", "怎么", "如何", "为什么", "可以吗", "能吗", "会吗", "有吗", "么"]
         if any(q in text for q in question_words):
             return False
 
-        # 2. 精确匹配命令式导出指令，如：
-        # - 导出大纲 电动力学
-        # - 导出专题 [热力学]
-        # - 帮我导出 太原旅游攻略
-        # - 导出复习资料 微分几何
-        pattern = r'^(?:帮我|请)?(?:导出|整理|生成)(?:专题|大纲|复习大纲|复习资料|知识大纲|笔记大纲)[:：\s]*(?:\[(.*?)\]|(.*?))$'
-        match = re.match(pattern, text)
-        if not match:
-            if text.startswith("导出 ") or text.startswith("导出：") or text.startswith("导出:"):
-                topic = text[3:].strip()
-            else:
-                return False
-        else:
-            topic = (match.group(1) or match.group(2) or "").strip()
-
-        # 去除残余助词和标点
-        topic = re.sub(r'^(?:专题|大纲|复习|资料|文档)\s*', '', topic)
-        topic = re.sub(r'\s*(?:专题|大纲|复习|资料|文档)$', '', topic).strip()
-
-        if not topic or len(topic) < 2:
+        # 2. 判断是否属于导出/生成文档指令
+        triggers = ["导出", "整理", "生成", "下载", "发我"]
+        if not any(text.startswith(t) or f"帮我{t}" in text or f"请{t}" in text for t in triggers):
             return False
 
-        print(f"⚡ [Feishu] 触发确定性专题大纲文件导出: {topic}")
+        # 提取 topic
+        topic = re.sub(r'^(?:帮我|请)?(?:导出|整理|生成|下载|发我)[:：\s]*', '', text).strip()
+        topic = re.sub(r'^(?:专题|大纲|复习大纲|复习资料|知识大纲|笔记大纲|文档|文件|解答|题解)[:：\s]*', '', topic).strip()
+        topic = topic.strip("[]【】 ")
+        topic_clean = re.sub(r'(?:专题|大纲|复习|资料|文档)$', '', topic).strip()
+        if topic_clean:
+            topic = topic_clean
+        if not topic:
+            topic = "物理核心知识"
+
+        print(f"⚡ [Feishu] 触发确定性专题大纲文件导出: {topic} (来自原始输入: {text})")
 
         now_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
         now_time_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
