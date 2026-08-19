@@ -812,6 +812,50 @@ def markdown_to_katex_html(title, md_content):
 """
     return full_html
 
+def upload_and_send_feishu_file(chat_id, file_name, file_content_str):
+    client = get_lark_client()
+    try:
+        file_bytes = file_content_str.encode('utf-8')
+        file_stream = io.BytesIO(file_bytes)
+        
+        file_req = CreateFileRequest.builder() \
+            .request_body(
+                CreateFileRequestBody.builder()
+                .file_type("stream")
+                .file_name(file_name)
+                .file(file_stream)
+                .build()
+            ).build()
+            
+        file_resp = client.im.v1.file.create(file_req)
+        if not file_resp.success():
+            print(f"[Error] 飞书文件上传失败: code={file_resp.code}, msg={file_resp.msg}")
+            return False
+            
+        file_key = file_resp.data.file_key
+        print(f"✅ [Feishu] 文件上传成功: file_name={file_name}, file_key={file_key}")
+        
+        msg_req = CreateMessageRequest.builder() \
+            .receive_id_type("chat_id") \
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("file")
+                .content(json.dumps({"file_key": file_key}))
+                .build()
+            ).build()
+            
+        msg_resp = client.im.v1.message.create(msg_req)
+        if msg_resp.success():
+            print(f"✅ [Feishu] 原生文件卡片消息已成功投递至聊天: {chat_id}")
+            return True
+        else:
+            print(f"[Error] 发送文件卡片消息失败: code={msg_resp.code}, msg={msg_resp.msg}")
+            return False
+    except Exception as e:
+        print(f"[Error] upload_and_send_feishu_file 异常: {e}")
+        return False
+
 def send_dual_format_document(chat_id, base_title, md_content):
     clean_title = re.sub(r'[\\/:*?"<>|]', '_', base_title)
     clean_title = clean_title.replace(".md", "").replace(".html", "").strip()
