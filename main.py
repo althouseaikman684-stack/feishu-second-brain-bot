@@ -542,18 +542,20 @@ def query_ai_brain(chat_id, user_text):
                 executed_actions.append((target_path, ok, res_path))
             ai_reply = re.sub(r"<<<NEW_NOTE:[\s\S]*?>>>", "", ai_reply).strip()
 
-        # 4. Intercept SEND_FILE (Native Feishu File Card Delivery)
+        # 4. Intercept SEND_FILE (Native Feishu Dual-Format File Delivery)
         if "<<<SEND_FILE:" in ai_reply:
             file_matches = re.findall(r"<<<SEND_FILE:\s*(.*?)\s*\|\s*([\s\S]*?)>>>", ai_reply)
             for send_fn, send_content in file_matches:
                 send_fn = send_fn.strip()
                 send_content = send_content.strip()
                 if not send_fn:
-                    send_fn = "第二大脑导出文档.md"
-                if not send_fn.endswith(".md") and not send_fn.endswith(".py") and not send_fn.endswith(".txt"):
-                    send_fn += ".md"
-                print(f"⚡ [Feishu] 触发大模型动态文件卡片投递: {send_fn} (大小: {len(send_content)} 字)")
-                upload_and_send_feishu_file(chat_id, send_fn, send_content)
+                    send_fn = "第二大脑导出文档"
+                base_title = send_fn.replace(".md", "").replace(".html", "").replace(".txt", "")
+                if send_fn.endswith(".py"):
+                    upload_and_send_feishu_file(chat_id, send_fn, send_content)
+                else:
+                    print(f"⚡ [Feishu] 触发大模型双格式文档投递: {base_title} (大小: {len(send_content)} 字)")
+                    send_dual_format_document(chat_id, base_title, send_content)
             ai_reply = re.sub(r"<<<SEND_FILE:[\s\S]*?>>>", "", ai_reply).strip()
 
         # Append Physical Execution Badges to AI reply
@@ -596,48 +598,244 @@ def send_feishu_reply(chat_id, text_content):
     if not resp.success():
         print(f"[Error] Failed to send Feishu reply: {resp.code}, {resp.msg}")
 
-def upload_and_send_feishu_file(chat_id, file_name, file_content_str):
-    client = get_lark_client()
-    try:
-        file_bytes = file_content_str.encode('utf-8')
-        file_stream = io.BytesIO(file_bytes)
+def markdown_to_katex_html(title, md_content):
+    lines = md_content.split('\n')
+    html_lines = []
+    in_code_block = False
+    in_list = False
+    
+    for line in lines:
+        stripped = line.strip()
         
-        file_req = CreateFileRequest.builder() \
-            .request_body(
-                CreateFileRequestBody.builder()
-                .file_type("stream")
-                .file_name(file_name)
-                .file(file_stream)
-                .build()
-            ).build()
-            
-        file_resp = client.im.v1.file.create(file_req)
-        if not file_resp.success():
-            print(f"[Error] 飞书文件上传失败: code={file_resp.code}, msg={file_resp.msg}")
-            return False
-            
-        file_key = file_resp.data.file_key
-        print(f"✅ [Feishu] 文件上传成功: file_name={file_name}, file_key={file_key}")
+        # Code blocks
+        if stripped.startswith('```'):
+            if in_list:
+                html_lines.append('</ul>')
+                in_list = False
+            in_code_block = not in_code_block
+            if in_code_block:
+                lang = stripped[3:].strip()
+                html_lines.append(f'<pre><code class="language-{lang}">')
+            else:
+                html_lines.append('</code></pre>')
+            continue
         
-        msg_req = CreateMessageRequest.builder() \
-            .receive_id_type("chat_id") \
-            .request_body(
-                CreateMessageRequestBody.builder()
-                .receive_id(chat_id)
-                .msg_type("file")
-                .content(json.dumps({"file_key": file_key}))
-                .build()
-            ).build()
-            
-        msg_resp = client.im.v1.message.create(msg_req)
-        if msg_resp.success():
-            print(f"✅ [Feishu] 原生文件卡片消息已成功投递至聊天: {chat_id}")
-            return True
+        if in_code_block:
+            escaped_code = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            html_lines.append(escaped_code)
+            continue
+
+        # Lists
+        if stripped.startswith('- ') or stripped.startswith('* '):
+            if not in_list:
+                html_lines.append('<ul>')
+                in_list = True
+            item_text = stripped[2:].strip()
+            item_text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', item_text)
+            item_text = re.sub(r'`(.*?)`', r'<code>\1</code>', item_text)
+            html_lines.append(f'<li>{item_text}</li>')
+            continue
         else:
-            print(f"[Error] 发送文件卡片消息失败: code={msg_resp.code}, msg={msg_resp.msg}")
-            return False
-    except Exception as e:
-        print(f"[Error] upload_and_send_feishu_file 异常: {e}")
+            if in_list:
+                html_lines.append('</ul>')
+                in_list = False
+
+        # Headers
+        if line.startswith('# '):
+            html_lines.append(f'<h1>{line[2:].strip()}</h1>')
+        elif line.startswith('## '):
+            html_lines.append(f'<h2>{line[3:].strip()}</h2>')
+        elif line.startswith('### '):
+            html_lines.append(f'<h3>{line[4:].strip()}</h3>')
+        elif line.startswith('#### '):
+            html_lines.append(f'<h4>{line[5:].strip()}</h4>')
+        elif line.startswith('> '):
+            quote_text = line[2:].strip()
+            quote_text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', quote_text)
+            quote_text = re.sub(r'`(.*?)`', r'<code>\1</code>', quote_text)
+            html_lines.append(f'<blockquote>{quote_text}</blockquote>')
+        elif stripped.startswith('---') or stripped.startswith('***'):
+            html_lines.append('<hr/>')
+        elif stripped == '':
+            html_lines.append('<div class="spacer"></div>')
+        else:
+            p_text = line
+            p_text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', p_text)
+            p_text = re.sub(r'`(.*?)`', r'<code>\1</code>', p_text)
+            html_lines.append(f'<p>{p_text}</p>')
+            
+    if in_list:
+        html_lines.append('</ul>')
+            
+    body_html = '\n'.join(html_lines)
+    
+    full_html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>{title}</title>
+  <!-- KaTeX CSS & JS -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body, {{
+    delimiters: [
+      {{left: '$$', right: '$$', display: true}},
+      {{left: '$', right: '$', display: false}},
+      {{left: '\\\\(', right: '\\\\)', display: false}},
+      {{left: '\\\\[', right: '\\\\]', display: true}}
+    ],
+    throwOnError: false
+  }});"></script>
+  <style>
+    :root {{
+      --bg-color: #ffffff;
+      --text-color: #1f2329;
+      --text-secondary: #646a73;
+      --accent-color: #3370ff;
+      --card-bg: #f5f6f7;
+      --border-color: #dee0e3;
+      --code-bg: #f2f3f5;
+    }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --bg-color: #121212;
+        --text-color: #e4e7ed;
+        --text-secondary: #8f959e;
+        --accent-color: #4e88ff;
+        --card-bg: #1e1e1e;
+        --border-color: #333333;
+        --code-bg: #262626;
+      }}
+    }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.75;
+      color: var(--text-color);
+      background-color: var(--bg-color);
+      margin: 0;
+      padding: 16px 18px 48px;
+      word-wrap: break-word;
+      font-size: 16px;
+    }}
+    h1 {{
+      font-size: 1.45rem;
+      color: var(--accent-color);
+      border-bottom: 2px solid var(--border-color);
+      padding-bottom: 8px;
+      margin-top: 12px;
+      margin-bottom: 16px;
+    }}
+    h2 {{
+      font-size: 1.25rem;
+      margin-top: 24px;
+      margin-bottom: 12px;
+      border-left: 4px solid var(--accent-color);
+      padding-left: 10px;
+      color: var(--text-color);
+    }}
+    h3 {{
+      font-size: 1.1rem;
+      margin-top: 18px;
+      margin-bottom: 10px;
+    }}
+    blockquote {{
+      margin: 12px 0;
+      padding: 10px 14px;
+      background: var(--card-bg);
+      border-left: 4px solid var(--accent-color);
+      color: var(--text-secondary);
+      border-radius: 0 6px 6px 0;
+      font-size: 0.95rem;
+    }}
+    hr {{
+      border: none;
+      border-top: 1px solid var(--border-color);
+      margin: 20px 0;
+    }}
+    ul {{
+      padding-left: 20px;
+      margin: 10px 0;
+    }}
+    li {{
+      margin-bottom: 6px;
+    }}
+    p {{
+      margin: 10px 0;
+    }}
+    .spacer {{
+      height: 8px;
+    }}
+    code {{
+      background: var(--code-bg);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: Consolas, Monaco, "Courier New", monospace;
+      font-size: 0.9em;
+      color: var(--accent-color);
+    }}
+    pre {{
+      background: var(--card-bg);
+      padding: 14px;
+      border-radius: 8px;
+      overflow-x: auto;
+      border: 1px solid var(--border-color);
+      font-family: Consolas, Monaco, "Courier New", monospace;
+      font-size: 0.9rem;
+    }}
+    .katex {{
+      font-size: 1.06em;
+    }}
+    .katex-display {{
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding: 10px 0;
+      margin: 14px 0;
+    }}
+    .footer-tip {{
+      margin-top: 36px;
+      padding-top: 14px;
+      border-top: 1px dashed var(--border-color);
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      text-align: center;
+    }}
+  </style>
+</head>
+<body>
+{body_html}
+<div class="footer-tip">
+  ⚡ 渲染引擎: KaTeX · 由林云舒的第二大脑 (Antigravity) 自动构建
+</div>
+</body>
+</html>
+"""
+    return full_html
+
+def send_dual_format_document(chat_id, base_title, md_content):
+    clean_title = re.sub(r'[\\/:*?"<>|]', '_', base_title)
+    clean_title = clean_title.replace(".md", "").replace(".html", "").strip()
+    
+    # 1. 生成并上传带 KaTeX 的 HTML 网页文件（移动端点击即渲染公式）
+    html_content = markdown_to_katex_html(clean_title, md_content)
+    html_fn = f"【📖公式渲染阅读版】_{clean_title}.html"
+    ok_html = upload_and_send_feishu_file(chat_id, html_fn, html_content)
+    
+    # 2. 上传原始 Markdown 文件（供知识库/Obsidian本地归档）
+    md_fn = f"【📝知识库源码版】_{clean_title}.md"
+    ok_md = upload_and_send_feishu_file(chat_id, md_fn, md_content)
+    
+    if ok_html or ok_md:
+        send_feishu_reply(
+            chat_id,
+            f"✅ 已成功为你生成并派发《{clean_title}》双格式文档！\n\n"
+            f"📱 **【.html 文件】**：手机点击直接打开，公式由 KaTeX 100% 高清矢量渲染；\n"
+            f"💾 **【.md 文件】**：原始 Markdown 代码，方便保存到本地 Obsidian / GitHub 知识库。"
+        )
+        return True
+    else:
+        # Fallback text
+        send_feishu_reply(chat_id, md_content[:2500])
         return False
 
 def handle_topic_export(chat_id, user_text):
@@ -738,24 +936,14 @@ $$c_n = \\int_{-a/2}^{a/2} \\psi_n'^*(x) \\psi_1(x) \\, dx$$
 > 💡 *本解答由第二大脑整理归档至 `memory/summary/daily/__DATE__.md` 与量子力学专题库。在飞书云文档中打开可获得完整的 LaTeX 公式排版体验！*
 """
             feynman_doc = feynman_template.replace("__DATE__", now_str)
-            fn = f"{now_str}_量子力学费曼挑战_瞬变势阱对称性定则解析.md"
-            ok = upload_and_send_feishu_file(chat_id, fn, feynman_doc)
-            if ok:
-                send_feishu_reply(chat_id, f"🎯 已成功为你生成并发送今日费曼挑战的深度解析文档《{fn}》！\n\n💡 手机端点击上方文件卡片，选择「用飞书云文档打开」，即可享受完美渲染编译的 LaTeX 积分与公式排版！")
-            else:
-                send_feishu_reply(chat_id, feynman_doc)
+            send_dual_format_document(chat_id, f"{now_str}_量子力学费曼挑战_瞬变势阱对称性定则解析", feynman_doc)
             return True
 
         # 特别支持 2：导出今日晨报
         if "晨报" in topic:
             morning_report = km.fetch_file_raw(f"vault/memory/summary/daily/{now_str}.md")
             if morning_report:
-                fn = f"{now_str}_每日晨报与前沿研判.md"
-                ok = upload_and_send_feishu_file(chat_id, fn, morning_report)
-                if ok:
-                    send_feishu_reply(chat_id, f"🌅 已成功为你生成并发送今日晨报文档《{fn}》！\n\n💡 点击上方文件卡片即可用飞书云文档查看。")
-                else:
-                    send_feishu_reply(chat_id, morning_report)
+                send_dual_format_document(chat_id, f"{now_str}_每日晨报与前沿研判", morning_report)
                 return True
 
         tree = km.get_vault_tree()
@@ -801,24 +989,7 @@ $$c_n = \\int_{-a/2}^{a/2} \\psi_n'^*(x) \\psi_1(x) \\, dx$$
             return True
 
         file_content_str = "\n".join(doc_lines)
-        file_name = f"{topic}_全景知识大纲.md"
-        
-        ok = upload_and_send_feishu_file(chat_id, file_name, file_content_str)
-        if ok:
-            send_feishu_reply(
-                chat_id,
-                f"✅ 已成功为你生成并发送《{file_name}》（共 {len(file_content_str)} 字）！\n\n"
-                f"💡 手机端点击上方文件卡片即可直接阅读、保存到本地或转存至飞书云文档。"
-            )
-        else:
-            preview_len = min(2500, len(file_content_str))
-            send_feishu_reply(
-                chat_id,
-                f"📚 《{topic}》第二大脑全景复习大纲（共 {len(file_content_str)} 字）：\n\n"
-                f"{file_content_str[:preview_len]}\n\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"💡 提示：如需在飞书里直接接收可下载的 .md 原生文件卡片（不占知识库空间），只需在飞书开发者后台勾选「获取与上传图片或文件资源 (im:resource:upload)」权限即可！"
-            )
+        send_dual_format_document(chat_id, f"{topic}_全景知识大纲", file_content_str)
         return True
     except Exception as e:
         print(f"[Error] handle_topic_export 发生异常: {e}")
