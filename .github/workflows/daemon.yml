@@ -31,10 +31,10 @@ jobs:
 
       - name: Run Feishu WebSocket Daemon
         env:
-          FEISHU_APP_ID: "cli_aa09bb45ebf89bda"
-          FEISHU_APP_SECRET: "V02XmqKk5HXUQw43XEx6Gz1hJ0Zd5SNV"
-          DEEPSEEK_API_KEY: "sk-52386a6bd06742c4900b9413923b8010"
-          GITHUB_TOKEN: "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"
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.VAULT_GITHUB_TOKEN }}
           GITHUB_REPO: "althouseaikman684-stack/second-brain-vault"
         run: |
           python -u main.py

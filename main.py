@@ -32,10 +32,10 @@ from lark_oapi.api.im.v1 import (
 
 # ==================== Credentials & Configuration ====================
 CONFIG = {
-    "APP_ID": os.environ.get("FEISHU_APP_ID", "cli_aa09bb45ebf89bda"),
-    "APP_SECRET": os.environ.get("FEISHU_APP_SECRET", "V02XmqKk5HXUQw43XEx6Gz1hJ0Zd5SNV"),
-    "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY", "sk-52386a6bd06742c4900b9413923b8010"),
-    "GITHUB_TOKEN": os.environ.get("GITHUB_TOKEN", "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"),
+    "APP_ID": os.environ.get("FEISHU_APP_ID", ""),
+    "APP_SECRET": os.environ.get("FEISHU_APP_SECRET", ""),
+    "DEEPSEEK_API_KEY": os.environ.get("DEEPSEEK_API_KEY", ""),
+    "GITHUB_TOKEN": os.environ.get("GITHUB_TOKEN", ""),
     "GITHUB_REPO": os.environ.get("GITHUB_REPO", "althouseaikman684-stack/second-brain-vault")
 }
 
