@@ -445,6 +445,10 @@ def query_ai_brain(chat_id, user_text):
 4. **【写入铁律】**：如果你在回复中向用户表示已添加待办或保存笔记，你**必须在回复末尾附带写入指令标签**：
    - 更新待办：`<<<UPDATE_TASK: [完整tasks Markdown内容]>>>`
    - 保存笔记：`<<<NEW_NOTE: [文件名.md] | [完整Markdown内容]>>>`
+5. **【📤 文件卡片通用导出能力 (SEND_FILE)】**：
+   - 当用户要求你将任何内容（如：学科复习大纲、刚才讨论的物理推导、论文研判、代码脚本、旅行攻略、随手总结等）【导出为文件 / 导出为md / 发送文件 / 发我文档 / 导出解答 / 生成md】时，你必须在回复末尾附带：
+     `<<<SEND_FILE: 文件名.md | 完整排版精美且公式严密的Markdown内容>>>`
+   - 系统会自动将其通过飞书 API 压制成原生文件卡片实时派发给用户，用户在飞书云文档中打开即可享受 100% 编译渲染的 LaTeX 与排版！
 
 【回答规则】：
 1. 语言亲切生动、极具专业深度，针对物理/数学/科研问题给出精确推导与物理图像（支持 Markdown 与 LaTeX 公式排版）。
@@ -537,6 +541,20 @@ def query_ai_brain(chat_id, user_text):
                 )
                 executed_actions.append((target_path, ok, res_path))
             ai_reply = re.sub(r"<<<NEW_NOTE:[\s\S]*?>>>", "", ai_reply).strip()
+
+        # 4. Intercept SEND_FILE (Native Feishu File Card Delivery)
+        if "<<<SEND_FILE:" in ai_reply:
+            file_matches = re.findall(r"<<<SEND_FILE:\s*(.*?)\s*\|\s*([\s\S]*?)>>>", ai_reply)
+            for send_fn, send_content in file_matches:
+                send_fn = send_fn.strip()
+                send_content = send_content.strip()
+                if not send_fn:
+                    send_fn = "第二大脑导出文档.md"
+                if not send_fn.endswith(".md") and not send_fn.endswith(".py") and not send_fn.endswith(".txt"):
+                    send_fn += ".md"
+                print(f"⚡ [Feishu] 触发大模型动态文件卡片投递: {send_fn} (大小: {len(send_content)} 字)")
+                upload_and_send_feishu_file(chat_id, send_fn, send_content)
+            ai_reply = re.sub(r"<<<SEND_FILE:[\s\S]*?>>>", "", ai_reply).strip()
 
         # Append Physical Execution Badges to AI reply
         if executed_actions:
