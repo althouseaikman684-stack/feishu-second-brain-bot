@@ -3,7 +3,7 @@ name: Feishu 24/7 Second Brain Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */5 * * *'
+    - cron: '0 */4 * * *'
   push:
     branches: [ main ]
 
@@ -14,7 +14,7 @@ concurrency:
 jobs:
   daemon:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 360
 
     steps:
       - name: Checkout Code

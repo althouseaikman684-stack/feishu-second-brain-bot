@@ -1265,8 +1265,10 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
         create_time_ms = int(getattr(message, "create_time", 0) or 0)
         now_ms = int(time.time() * 1000)
         if create_time_ms > 0:
-            if create_time_ms < (BOT_START_TIME_MS - 5000) or (now_ms - create_time_ms) > 30000:
-                print(f"[Feishu 24/7] 🚫 丢弃历史重放消息: id={message_id}, 延迟={(now_ms - create_time_ms)/1000:.1f}秒")
+            delay_sec = (now_ms - create_time_ms) / 1000
+            # 仅丢弃超过 10 分钟 (600秒) 的陈旧重放消息，确保短暂重启或网络抖动期间用户发出的消息仍能正常被处理
+            if delay_sec > 600:
+                print(f"[Feishu 24/7] 🚫 丢弃超过10分钟的历史陈旧消息: id={message_id}, 延迟={delay_sec:.1f}秒")
                 return
     except Exception as e:
         print(f"[Warn] Message timestamp parse error: {e}")
@@ -1302,6 +1304,15 @@ def do_p2_im_message_receive_v1(data: P2ImMessageReceiveV1) -> None:
                 send_feishu_reply(chat_id, f"⚠️ 处理你的消息时遇到了小异常: {e}，请再试一次或直接提问！")
             except Exception:
                 pass
+    elif msg_type == "audio":
+        print(f"🎙️ [Feishu 24/7] 收到语音消息 (msg_id: {message_id})")
+        send_feishu_reply(chat_id, "🎙️ 收到你的语音消息啦！目前移动管家处于纯文字与 Markdown 极速推理模式，暂未开启语音流识别。推荐你直接使用手机键盘自带的「语音转文字」功能转成文字发给我，我会秒级为你解答、记录待办或检索知识库！")
+    elif msg_type == "image":
+        print(f"🖼️ [Feishu 24/7] 收到图片消息 (msg_id: {message_id})")
+        send_feishu_reply(chat_id, "🖼️ 收到你的图片啦！目前移动管家主要通过文字进行知识库问答、待办记录与文档导出。如果是单据/表格，电脑端已支持 SmartTableOCR 智能单据识别工具哦！")
+    else:
+        print(f"ℹ️ [Feishu 24/7] 收到其他格式消息: type={msg_type}")
+        send_feishu_reply(chat_id, f"ℹ️ 收到了一则【{msg_type}】消息。目前移动管家专注于文本推理与知识库同步，请尽量通过文字向我提问或记录待办哦！")
 
 # ==================== Main Entry ====================
 def main():
